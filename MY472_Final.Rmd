@@ -1,99 +1,587 @@
 ---
-title: "MY472 Final"
+title: "MY472_Final"
+author: "CT-Dev1"
+date: "01/01/2024"
 output: html_document
-date: "2023-12-24"
 ---
-
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
 ```
 
-OVERALL NOTES:
-- You're waiting to hear back on the forum about use of regression techniques
-  This is relatively important as you need to compare groups within the same policing area as the rate of stop and search by     area is a primary confounder
-- Remember to add readme to github repo - it will be marked too
-
-
-Chosen Option 1: Number 3 - Police Stop and Search
-
-Research Question:
-“In the United Kingdom, a police officer has powers to stop and search any individual if the officer has ‘reasonable grounds’ to suspect the individual is carrying certain items or, under some other conditions, if a senior police officer has granted approval (see here for details). Are there biases in who experiences stop and search by the police?”
-
-## Section 1 - Introduction)
-
-Are there biases in who experiences stop and search by the police?
-
-What is bias in this context?
-
-- Bias is defined as a prejudice against individuals or groups that is considered to be unfair. It may manifest in the disproportionate targeting of certain individuals based on race, ethnicity, age, gender, socioeconomic status or other personal factors, rather than objective evidence or intelligence-based policing. (GPT WROTE THIS)
-
-What are 'reasonable grounds' for stop and search? How can we measure their occurrence relative to any affect of bias?
-
-
-What are the key statistical aspects of bias?
-
-1) Disproportionality - Are certain groups searched at rates disproportionate to their representation in the population OR to the crime rates associated with that group?
-- If we control for crime rates, are certain groups still searched at disproportionate rates?
-
-2) Outcome Discrepancy - Are certain groups more likely to be arrested or charged after being searched?
-
-3) Source of discrimination - do biases originate at the individual level or at the institutional level (senior police officers)?
-
-
-Where would bias originate?
-
-Police officer - Individual level
-
-Police force - Senior police officer level (Institutional)
-
-
-What are important factors to account for?
-
-- Are biases genuinely prejudicial in nature, or do they reflect a higher rate of crime in certain areas?
-
-Section 2 - Data)
-
--Use the 'ukpolice' R package to get the data
-
-```{r}
+```{r load_packages, eval = TRUE}
+#Load required packages
 library(ukpolice)
 library(tidyverse)
+library(sf)
+library(sp)
+library(httr)
+library(jsonlite)
+library(RSQLite)
+library(httr)
+library(netstat)
+library(texreg)
+library(gtsummary)
+```
+
+```{r load_data, eval = TRUE}
+#Ethnicity Population Data by LSOAs (downloaded from office for national statistics - 2021 data)
+ethnicity_data <- read.csv("data\\LSOA_ethnicity.csv")
+
+#Local District Shape Files from GeoJSON
+LSOA_shapes <- st_read("data\\LSOA_shapefiles.geojson")
+
+#Police Force Shape files from GeoJSON
+pf_shapes <- st_read("data\\force_areas_shapefiles.geojson")
+```
+
+```{r clean_data, eval = TRUE}
+#Create table for LSOAs by police force area
+LSOA_by_force <- LSOA_shapes %>% 
+  st_centroid() %>% 
+  st_join(pf_shapes, join = st_intersects) %>% 
+  as_tibble() %>%
+  select(c(LSOA21CD, LSOA21NM, pfa16cd, pfa16nm)) %>% 
+  rename(LSOA_code = LSOA21CD, LSOA_name = LSOA21NM, force_code = pfa16cd, force_name = pfa16nm)
+
+#Create table for population by ethnicity for LSOA
+ethnicity_by_LSOA <- ethnicity_data %>% 
+  rename(LSOA_code = Lower.layer.Super.Output.Areas.Code, LSOA_name = Lower.layer.Super.Output.Areas, ethnic_group = Ethnic.group..20.categories.) %>%
+  select(LSOA_code, Observation, ethnic_group) %>%
+  pivot_wider(names_from = ethnic_group, values_from = Observation) %>% 
+  mutate(total_pop = rowSums(across(where(is.numeric))))
+
+#Joining the two tables
+ethnicity_by_force <- LSOA_by_force %>% 
+  full_join(ethnicity_by_LSOA, by = "LSOA_code") %>% 
+  group_by(force_code, force_name) %>%
+  mutate(force_name = str_replace_all(force_name, " Police", "")) %>%
+  summarize(across(where(is.numeric), sum, na.rm = TRUE))
+
+```
+
+```{r get_ss_data, eval = TRUE}
+#Create table that relates API input, force name and force code in standard format
+police_forces <- ukc_forces()%>% 
+  rename(force_name = name, ukc_input = id)%>% 
+  mutate(force_name = str_replace_all(force_name, " Police", "")) %>% 
+  mutate(force_name = str_replace_all(force_name, " Constabulary", "")) %>% 
+  mutate(force_name = str_replace_all(force_name, "&", "and")) %>%
+  mutate(force_name = str_replace_all(force_name, " Service", "")) %>%
+  inner_join(ethnicity_by_force, by = "force_name") %>% 
+  select(force_name, ukc_input, force_code)
+
+#Vector of months to loop through, input into API
+dates <- c("2022-01","2022-02","2022-03","2022-04","2022-05","2022-06","2022-07","2022-08","2022-09","2022-10","2022-11","2022-12")
+```
 
 
-tv_ss <- ukc_stop_search_force("thames-valley", date = "2018-12")
+```{r get_ss_data_2, eval = FALSE}
+#Function to clean the raw data from API
+clean_ss_data <- function(ss_data, force, month) {
+  force_data <- ss_data %>% 
+    mutate(ukc_input = force) %>% 
+    inner_join(police_forces, by = "ukc_input") %>% 
+    select(age_range, gender, self_defined_ethnicity, officer_defined_ethnicity, legislation, object_of_search, outcome_object_name, legislation, force_code, force_name, ukc_input) %>% 
+    mutate(self_defined_ethnicity = ifelse(grepl("Not stated", self_defined_ethnicity), NA, self_defined_ethnicity)) %>% 
+    mutate(racial_group = ifelse(is.na(self_defined_ethnicity), officer_defined_ethnicity, self_defined_ethnicity)) %>% 
+    #Add column for racial_group based on ethnicity classification
+    mutate(racial_group = ifelse(grepl("White", racial_group, fixed = TRUE), 'White',
+                           ifelse(grepl("Asian", racial_group, fixed = TRUE), 'Asian',
+                           ifelse(grepl("Black", racial_group, fixed = TRUE), 'Black',
+                           ifelse(grepl("Mixed", racial_group, fixed = TRUE), 'Mixed',
+                           ifelse(grepl("Other", racial_group, fixed = TRUE), 'Other', NA)))))) %>% 
+    mutate(month = month)
+  return(force_data)
+}
 
-tv_ss2 <- tv_ss %>% 
-  filter(!is.na(officer_defined_ethnicity) & outcome != "" ) %>%
-  group_by(officer_defined_ethnicity, outcome) %>%
-  summarise(n = n()) %>%
-  mutate(perc = n/sum(n))
+#Script to download stop and search data for all police forces over 2022
+'
+#Empty tibble to store the data
+stop_search_2022 <- ukc_stop_search_force("bedfordshire","2022-01") %>%
+  clean_ss_data("bedfordshire", "2022-01") %>%
+  slice(0)
 
-p1 <- ggplot(tv_ss2, aes(x = outcome, y = perc,
-                             group = outcome, fill = outcome)) + 
-  geom_col(position = "dodge") + 
-  scale_y_continuous(labels = scales::percent,
-                     breaks = seq(0.25, 0.8, by = 0.25)) + 
-  scale_x_discrete(labels = scales::wrap_format(15)) + 
-  theme(legend.position = "none", axis.text.x = element_text(size = 7)) + 
-  labs(x = "Outcome", 
-       y = "Percentage of stop and searches resulting in outcome",
-       title = "Stop and Search Outcomes by Police-Reported Ethnicity",
-       subtitle = "Thames Valley Police Department, December 2018",
-       caption = "(c) Evan Odell | 2019 | CC-BY-SA") + 
-  facet_wrap(~officer_defined_ethnicity)
+#table to store missing forces and months
+missing_data = tibble(ukc_input = character(), month = character())
 
-p1
+#Loop over all police forces and months
+for (month in dates){
+  for (force in police_forces$ukc_input){
+    force_data <- ukc_stop_search_force(force, month)
+    if (length(force_data)==0 | is.null(force_data)){
+      missing_data <- missing_data %>% 
+        add_row(ukc_input = force, month = month)
+      next
+    } else {
+    stop_search_2022 <- force_data %>% 
+      clean_ss_data(force, month) %>%
+      rbind(stop_search_2022)
+    }}
+  Sys.sleep(3) 
+}
+'
+```
 
 
-#List of police forces
-police_forces <- ukc_forces()
+```{r partial_missing_data_fill, eval = FALSE}
+#There is missing data, so investigate police API issue log at https://data.police.uk/changelog/
+#Some forces have partial missing data for 2022, so we will utilize forward propagation to fill in the data
+'
+#Create table of partial missing data
+partial_missing_forces <- missing_data %>% 
+  filter(ukc_input %in% c("greater-manchester","gwent", "north-yorkshire")==FALSE) %>% 
+  mutate(month_index = as.numeric(str_replace_all(month, "2022-", ""))) 
 
-head(police_forces, 50)
+#create table of inputs for forward propagation
+forward_prop_input <- missing_data %>% 
+  filter(ukc_input %in% c("greater-manchester","gwent", "north-yorkshire")==FALSE) %>% 
+  group_by(ukc_input) %>%
+  summarize(missing_months = n()) %>% 
+  inner_join(police_forces, by = "ukc_input")
 
-# Retrieve stop and search data for a specific police force for January 2021
-crime_data <- ukc_stop_search_force("metropolitan", date = "2023-9")
+#Script to loop over missing data by force and month
 
-dim(crime_data)
+for (force in forward_prop_input$ukc_input){
+  missing_months <- forward_prop_input$missing_months[forward_prop_input$ukc_input==force]
+  last_record_month <- min(partial_missing_forces$month_index[partial_missing_forces$ukc_input==force]) -1
+  month_input <- paste0("2022-", last_record_month)
+  for (i in 1:forward_prop_input$missing_months[forward_prop_input$ukc_input==force]){
+    force_data <- ukc_stop_search_force(force, month_input)
+    month_filled_input <- paste0("2022-", last_record_month+i)
+    stop_search_2022 <- force_data %>% 
+      clean_ss_data(force, month_filled_input) %>%
+      rbind(stop_search_2022)
+  }
+}
+
+#Write to disk, this is commented out, data is stored in stop_search_2022.csv in data folder (within the github)
+write_csv(stop_search_2022, "stop_search_2022.csv")
+'
+```
+
+
+```{r load_ss_data, eval = TRUE}
+#Load full dataset from csv, which is only missing data for Greater Manchester, Gwent and North Yorkshire, these I add manually at later stages
+stop_search_2022 <- read_csv("data//stop_search_2022.csv")
+```
+
+```{r missing_data_test, eval = FALSE}
+#test that forward propagation worked using the test case of South Wales, which previously had some missing data
+'
+stop_search_2022 %>% 
+  filter(force_name == "South Wales") %>% 
+  group_by(month) %>% 
+  summarize(total_stops = n()) %>% 
+  print()
+
+#Demonstration that API fails for some forces - greater manchester, gwent and north yorkshire
+url <- "https://data.police.uk/api/stops-force?force=greater-manchester&date=2022-02"
+json <- content(GET(url), "parsed")
+print(is.null(json)|length(json)==0)
+'
+```
+
+```{r total_missing_data_fill, eval = TRUE}
+#North Yorkshire, Gwent and Greater Manchester have no ethnicity data at all for any period
+#Given this, can extract from alternative data source, Home office stop and search by ethnicity of 2022
+
+#download this missing data from gov.uk - this was done previously, data stored in missing_forces_stop_search.csv
+
+#url <- "https://www.ethnicity-facts-figures.service.gov.uk/crime-justice-and-the-law/policing/stop-and-search/latest/downloads/stop-and-search-#data-2006-2022.csv"
+#download.file(url, destfile = "missing_forces_stop_search.csv")
+missing_forces_ss <- read.csv("data/missing_forces_stop_search.csv")
+
+#Process the data to filter for the missing police forces, keep it for later use to input missing data
+#Full data set
+missing_forces_to_input <- missing_forces_ss %>% 
+  rename(number_of_stop_and_searches_ethnicity_reported = total_number_of_stop_and_search_carried_out_in_this_year_in_this_area_excluding_cases_where_the_ethnicity_was_unreported, stop_search_rate_ethnicity = proportion_of_total_stop_and_searches_of_this_ethnicity_in_the_financial_year_excludes_unreported) %>%
+  mutate(time = as.character(time)) %>% 
+  filter(geography %in% c("Gwent", "Greater Manchester", "North Yorkshire")==TRUE) %>% 
+  filter(geography_type == "Police Force Area" & time == "2021/22") %>% 
+  select(ethnicity, geography, number_of_stop_and_searches, number_of_stop_and_searches_ethnicity_reported, population_by_ethnicity, rate_per_1_000_population_by_ethnicity, stop_search_rate_ethnicity)
+
+#Total rate by force (for Gwent, Manchester, N Yorkshire)
+missing_forces_ss_rate <- missing_forces_to_input %>% 
+  select(ethnicity, geography, population_by_ethnicity, number_of_stop_and_searches)
+```
+
+```{r ss_by_race_tables, eval = TRUE}
+#race populations by force area
+race_by_force <- ethnicity_by_force %>% 
+  pivot_longer(cols = -c(force_code,force_name), names_to = "racial_group", values_to = "population") %>% 
+  mutate(racial_group = ifelse(grepl("White", racial_group, fixed = TRUE), 'White',
+                       ifelse(grepl("Asian", racial_group, fixed = TRUE), 'Asian',
+                       ifelse(grepl("Black", racial_group, fixed = TRUE), 'Black',
+                       ifelse(grepl("Mixed", racial_group, fixed = TRUE), 'Mixed',
+                       ifelse(grepl("Other", racial_group, fixed = TRUE), 'Other', NA)))))) %>%
+  group_by(force_name, racial_group) %>% 
+  summarize(population = sum(population[racial_group==racial_group])) %>% 
+  filter(is.na(racial_group)==FALSE) %>%
+  pivot_wider(names_from = racial_group, values_from = "population", names_prefix = "population_") %>% 
+  mutate(population_Total = population_White + population_Black + population_Mixed + population_Asian + population_Other) %>%
+  inner_join(police_forces, by = "force_name")
+
+#rate of stop and search by race
+race_stops_data <- stop_search_2022 %>% 
+  mutate(self_defined_ethnicity = ifelse(grepl("Not stated", self_defined_ethnicity), NA, self_defined_ethnicity)) %>% 
+  filter(is.na(self_defined_ethnicity)==FALSE) %>%
+  group_by(force_name) %>% 
+  summarize(total_stops_ethnicity_reported = n(), black_stops = sum(racial_group=="Black"), white_stops = sum(racial_group=="White"), mixed_stops = sum(racial_group=="Mixed"), asian_stops = sum(racial_group=="Asian"), other_stops = sum(racial_group=="Other")) %>%  
+  inner_join(police_forces, by = "force_name") %>%
+  inner_join(race_by_force, by = c("force_name","force_code")) %>% 
+  mutate(stop_rate_black = (black_stops/population_Black)*1000, stop_rate_white = (white_stops/population_White)*1000, stop_rate_mixed = (mixed_stops/population_Mixed)*1000, stop_rate_asian = (asian_stops/population_Asian)*1000, stop_rate_other = (other_stops/population_Other)*1000, stop_rate_total = (total_stops_ethnicity_reported/population_Total)*1000)
+```
+- add number of stop and searches no ethnicity reported
+-note that the rate is based on the number of stops where ethnicity is reported, this can change the rate significantly
+- in the above, the total stop and searches are those with no ethnicity reported
+
+```{r visualize_total_ss_rate, eval=TRUE}
+#Visualizing search rate by police force area
+
+#total stops by force for N yorkshire, Gwent and Greater Manchester (The missing data)
+total_stops_man_gwent_yorkshire <- missing_forces_to_input %>% 
+  select(geography, number_of_stop_and_searches, ethnicity) %>%
+  group_by(geography) %>%
+  summarize(total_stops = sum(number_of_stop_and_searches[ethnicity == ethnicity])) %>% 
+  rename(force_name = geography)
+
+#Total stops by force (complete data)
+ss_rate_by_force <- stop_search_2022 %>% 
+  group_by(force_name) %>%
+  summarize(total_stops = n()) %>% 
+  rbind(total_stops_man_gwent_yorkshire) %>% 
+  inner_join(race_by_force, by = c("force_name")) %>%
+  mutate(stop_rate_total = (total_stops/population_Total)*1000) %>%
+  select(force_name, stop_rate_total) %>% 
+  #Exclude City of London, as it is an outlier, it skews the graph range, mkaing variability invisible
+  filter(force_name != "City of London")
+
+#Generating the visualization data, combining with the force shapefile dataframe
+map_data <- pf_shapes %>% 
+  rename(force_name = pfa16nm) %>% 
+  mutate(force_name = ifelse(force_name=="Metropolitan Police", "Metropolitan", force_name)) %>%
+  filter(force_name != "City of London") %>%
+  inner_join(ss_rate_by_force, by = "force_name")
+
+#creating visualization map of England and Wales
+map1 <- ggplot(map_data, aes(fill = stop_rate_total)) +
+  geom_sf() +
+  scale_fill_viridis_c(option = "plasma", direction = -1, na.value = "grey90", name = "Stop and search rate per 1000 people") +
+  theme_void() +
+  theme(legend.position = "bottom") +
+  labs(title = "Stop and Search Rate by Police Force Area", subtitle = "2021/22", caption = "Source: Police.uk, 2022, based on number of searches that recorded racial/ethnicity data")
+
+map1  #display the map
+```
+
+Notes on above:
+- We exclude the City of London due to the number of people who visit compared to the small number of people who live there
+
+
+Now, to run some statistical tests using linear regression
+```{r regression_full_data, eval=TRUE}
+#Table of stops by race by force, tidy long format
+race_stops_data_long <- race_stops_data %>% 
+  select(stop_rate_black, stop_rate_white, stop_rate_mixed, stop_rate_asian, stop_rate_other, force_name) %>%
+  rename(Black = stop_rate_black, White = stop_rate_white, Mixed = stop_rate_mixed, Asian = stop_rate_asian, Other = stop_rate_other) %>%
+  pivot_longer(cols = c(Black, White, Mixed, Asian, Other), names_to = "racial_group", values_to = "stops_rate_per_1000") %>% print()
+
+#Data for regression - total population = the 
+regression_data <- stop_search_2022 %>% 
+  mutate(self_defined_ethnicity = ifelse(grepl("Not stated", self_defined_ethnicity), NA, self_defined_ethnicity)) %>% 
+  filter(is.na(self_defined_ethnicity)==FALSE) %>%
+  inner_join(race_stops_data_long, by = c("racial_group","force_name")) %>% 
+  filter(force_name != "City of London") %>%
+  mutate(racial_group = as_factor(racial_group), force_name = as_factor(force_name)) %>% 
+  rename(Male = gender) %>% 
+  mutate(Male = ifelse(Male == "Male", 1, 0)) 
+
+#Multiple Linear Regression model, finding effect of race, force area, male gender on likelihood of being stopped 
+#set the reference groups to be white for racial group and Kent for force area, as it has near-average stop and search rate (6.78 per 1000)
+reg1 <- lm(stops_rate_per_1000 ~ relevel(racial_group, ref="White") + relevel(force_name, ref="Kent") + Male, data = regression_data)
+
+#Tidy Present
+tbl_regression(reg1)
+```
+
+
+
+
+```{r}
+#Number of searches by ethnicity by force
+ethnicity_stops <- stop_search_2022 %>% 
+    mutate(self_defined_ethnicity = ifelse(grepl("Not stated", self_defined_ethnicity), NA, self_defined_ethnicity)) %>% 
+    filter(is.na(self_defined_ethnicity)==FALSE) %>% 
+    group_by(self_defined_ethnicity, force_name) %>% 
+    summarize(total_stops = n()) %>% 
+    pivot_wider(names_from = self_defined_ethnicity, values_from = total_stops)
+
+
+harmonize_ethnicity <- function(ethnicity) {
+  # Define the mapping between census and police ethnicities
+  mapping <- list(
+    "Asian, Asian British or Asian Welsh: Other Asian" = "Asian/Asian British - Any other Asian background",
+    "White: English, Welsh, Scottish, Northern Irish or British" = "White - English/Welsh/Scottish/Northern Irish/British",
+    "Does not apply" = NA,
+    "Mixed or Multiple ethnic groups: Other Mixed or Multiple ethnic groups" = "Mixed/Multiple ethnic groups - Any other Mixed/Multiple ethnic background",
+    "White: Other White" = "White - Any other White background",
+    "Black, Black British, Black Welsh, Caribbean or African: African" = "Black/African/Caribbean/Black British - African",
+    "Black, Black British, Black Welsh, Caribbean or African: Other Black" = "Black/African/Caribbean/Black British - Any other Black/African/Caribbean background",
+    "Asian, Asian British or Asian Welsh: Pakistani" = "Asian/Asian British - Pakistani",
+    "Asian, Asian British or Asian Welsh: Bangladeshi" = "Asian/Asian British - Bangladeshi",
+    "Other ethnic group: Any other ethnic group" = "Other ethnic group - Any other ethnic group",
+    "Mixed or Multiple ethnic groups: White and Black African" = "Mixed/Multiple ethnic groups - White and Black African",
+    "White: Gypsy or Irish Traveller" = "White - Gypsy or Irish Traveller",
+    "Mixed or Multiple ethnic groups: White and Black Caribbean" = "Mixed/Multiple ethnic groups - White and Black Caribbean",
+    "Other ethnic group: Arab" = "Other ethnic group - Arab",
+    "White: Irish" = "White - Irish",
+    "Black, Black British, Black Welsh, Caribbean or African: Caribbean" = "Black/African/Caribbean/Black British - Caribbean",
+    "Mixed or Multiple ethnic groups: White and Asian" = "Mixed/Multiple ethnic groups - White and Asian",
+    "Asian, Asian British or Asian Welsh: Indian" = "Asian/Asian British - Indian",
+    "Asian, Asian British or Asian Welsh: Chinese" = "Asian/Asian British - Chinese"
+  )
+  # Return the corresponding police ethnicity, or NA if no match is found
+  return(ifelse(ethnicity %in% names(mapping), mapping[[ethnicity]], NA))
+}
+
+ethnicity_by_force_harmonized <- ethnicity_by_force %>% 
+  pivot_longer(names_to = "ethnicity", values_to = "total_stops",cols= -c(force_code,force_name))
+
+#ENCOUNTERS ERROR WITH THE ABOVE
+
+
+#rate per 1000 population by ethnicity by force
+ethnicity_stop_rates <- ethnicity_stops %>% 
+  
+
+inner_join(ethnicity_by_force, by = "force_name") %>%
+  print()
+  
+```
+
+
+```{r}
+#number of searches by ethnicity
+  ss_analysis_ethnicity <- force_data %>% 
+    select(age_range, gender, self_defined_ethnicity, officer_defined_ethnicity, legislation, object_of_search, outcome_object_name, legislation) %>%
+    mutate(self_defined_ethnicity = ifelse(grepl("Not stated", self_defined_ethnicity), NA, self_defined_ethnicity)) %>% 
+    filter(is.na(self_defined_ethnicity)==FALSE) %>% 
+    group_by(self_defined_ethnicity) %>% 
+    summarize(total_stops = n(), male_stops = sum(grepl("Male",gender)), female_stops = sum(grepl("Female",gender)))
+  
+  #full population analysis
+  ss_analysis_total_pop <- force_data %>% 
+    select(age_range, gender, self_defined_ethnicity, officer_defined_ethnicity, legislation, object_of_search, outcome_object_name, legislation) %>%
+    summarize(total_stops = n(), male_stops = sum(grepl("Male",gender)), female_stops = sum(grepl("Female",gender)))
+  
+  #join into larger table
+  ss_data <- ethnicity_by_force %>% 
+    full_join()
+  
+}
+  
+
+```
+
+
+To think about:
+- Writing to database
+- Get database on all stop and search data for time period for each police force 
+- Then you can query it to get all the relevant statistics
+- Instead of using crime statistics to determine if there is bias, you can look at the rate of arrest by stop and search
+
+
+Notes on above:
+- You'll have to replace the path with a path online - replicable - however all the data sources are the best available
+- Remember to change the above ethnicity_data path to an original data source - its currently on the data you've pre-edited
+- add in age data later on
+
+
+Notes on above:
+- If you have time, rename all the variables to be consistent across all dataframes
+- Reference the fact that you tested the level of distortion so that it is not too extreme
+- If you have time, put all the data frames into a SQL database and query it for analyses where local district code is the primary key
+
+
+
+```{r}
+
+#find all the different ethnicity types in the stop search data
+metro_force_data <- ukc_stop_search_force("metropolitan", "2021-06")
+ethnicity_bins <- unique(metro_force_data$self_defined_ethnicity)
+ethnicity_bins[is.na(ethnicity_bins)] <- "NA" #string representation of NA
+
+#Creating a dictionary of ethnicity types
+#Represents the 18 ethnicity bins used in the stop_search data
+ethnicity_dict <- c("NA" = "NA", "Other ethnic group - Not stated" = "NA", 
+                    "Black/African/Caribbean/Black British - African" = "black_african", 
+                    "Asian/Asian British - Pakistani" = "asian_pakistani", 
+                    "White - Any other White background" = "white_other", 
+                    "Asian/Asian British - Any other Asian background" = "asian_other", 
+                    "White - English/Welsh/Scottish/Northern Irish/British" = "white_british", 
+                    "Black/African/Caribbean/Black British - Any other Black/African/Caribbean background" = "black_other", 
+                    "Mixed/Multiple ethnic groups - White and Black Caribbean" = "mixed_white_black_caribbean", 
+                    "Other ethnic group - Any other ethnic group" = "other", 
+                    "Asian/Asian British - Indian" = "asian_indian", 
+                    "Mixed/Multiple ethnic groups - Any other Mixed/Multiple ethnic background" = "mixed_other", 
+                    "Black/African/Caribbean/Black British - Caribbean" = "black_carribean", 
+                    "Asian/Asian British - Chinese" = "asian_chinese", 
+                    "White - Irish" = "white_irish", 
+                    "Mixed/Multiple ethnic groups - White and Black African" = "mixed_white_black_african", 
+                    "Mixed/Multiple ethnic groups - White and Asian" = "mixed_white_asian", 
+                    "Asian/Asian British - Bangladeshi" = "asian_bangladeshi")
+
+#Constructing the data frames to store results by district
+NA_data_by_district_ethnicity <- as.tibble(data.frame(district_code = local_districts$LAD22CD, district_name = local_districts$LAD22NM))
+ss_by_district_race <- as.tibble(data.frame(district_code = local_districts$LAD22CD, district_name = local_districts$LAD22NM, total_stops = NA, white_stops = NA, asian_stops = NA, black_stops = NA, mixed_stops = NA, other_stops = NA))
+#ethnicity data by district
+ss_by_district_ethnicity <- as.tibble(data.frame(district_code = local_districts$LAD22CD, district_name = local_districts$LAD22NM))
+na_matrix <- matrix(NA, ncol = length(ethnicity_bins), nrow = 331)
+colnames(na_matrix) <- ethnicity_bins
+ss_by_district_ethnicity <- cbind(ss_by_district_ethnicity, na_matrix)
+                                      
+#BUILDING FUNCTION TO AGGREGATE THE DATA by LOCAL DISTRICT - STARTING WITH STOP-SEARCH RATES
+district_data <- ukc_stop_search_poly(local_districts[309,], "2021-06")
+
+#error handling
+if (is.null(district_data)) {
+  print("here")
+} else {
+    print("there")
+  }
+
+#
+NA_responses <- district_data %>%
+  #replace self defined ethnicity which is 'ethnicity not stated' as NA
+  mutate(self_defined_ethnicity = ifelse(grepl("Not stated", self_defined_ethnicity, fixed = TRUE), NA, self_defined_ethnicity)) %>% 
+  #filter for the rows with no racial/ethnicity data whatsoever
+  filter(is.na(self_defined_ethnicity) & is.na(officer_defined_ethnicity)) %>%
+  #create new column that defaults to self_defined_ethnicity unless is NA, then officer defined ethnicity
+  mutate(race = ifelse(is.na(self_defined_ethnicity), officer_defined_ethnicity, self_defined_ethnicity)) %>%
+  summarize(stops_w_missing_ethnicity = sum(is.na(race))) %>% 
+  mutate(district_code = local_districts[309,]$LAD22CD, district_name = local_districts[309,]$LAD22NM) %>%  #FORMAT LATER SO IT JUST REFERS TO THE DISTRICT BEING ITERATED OVER
+  print()
+
+#Add Na_responses to the NA_data_by_district_ethnicity data frame
+full_join(NA_data_by_district_ethnicity, NA_responses, by= "district_code") %>% print()
+
+
+district_ethnicity_data <- district_data %>% 
+  #remove rows with no ethnicity data
+  filter(is.na(self_defined_ethnicity)==FALSE | is.na(officer_defined_ethnicity)==FALSE) %>%
+  #replace self defined ethnicity which is 'ethnicity not stated' as NA
+  mutate(self_defined_ethnicity = ifelse(grepl("Not stated", NA, self_defined_ethnicity))) %>% 
+  #create new column that defaults to self_defined_ethnicity unless is NA, then officer defined ethnicity
+  mutate(ethnicity = ifelse(is.na(self_defined_ethnicity), officer_defined_ethnicity, self_defined_ethnicity)) %>% 
+  #Classify each search as its umbrella ethnicity group (ie. race)
+  mutate(umbrella_ethnicity = ifelse(grepl("White", ethnicity, fixed = TRUE), 'White',
+                             ifelse(grepl("Asian", ethnicity, fixed = TRUE), 'Asian',
+                             ifelse(grepl("Black", ethnicity, fixed = TRUE), 'Black',
+                             ifelse(grepl("Mixed", ethnicity, fixed = TRUE), 'Mixed',
+                             ifelse(grepl("Other", ethnicity, fixed = TRUE), 'Other', NA)))))) %>% 
+  #summarize the data
+  #count the number of instances of each ethnic umbrella group
+  group_by(umbrella_ethnicity) %>% 
+  #sum the number of each ethnicity
+  tally() %>% print()
+  
+  
+  
+district_ethnicity_data <- district_data %>% 
+  filter(is.na(self_defined_ethnicity)==FALSE | is.na(officer_defined_ethnicity)==FALSE) %>%
+  #create new column that defaults to self_defined_ethnicity, else officer defined ethnicity
+  mutate(ethnicity = ifelse(is.na(self_defined_ethnicity), officer_defined_ethnicity, self_defined_ethnicity)) %>% 
+  #Add an ethnic umbrella group indicator
+  mutate(umbrella_ethnicity = ifelse(grepl("White", ethnicity, fixed = TRUE), 'White',
+                                     ifelse(grepl("Asian", ethnicity, fixed = TRUE), 'Asian',
+                                     ifelse(grepl("Black", ethnicity, fixed = TRUE), 'Black',
+                                     ifelse(grepl("Mixed", ethnicity, fixed = TRUE), 'Mixed',
+                                     ifelse(grepl("Other", ethnicity, fixed = TRUE), 'Other', NA)))))) %>% 
+  #summarize the data
+  #count the number of instances of each ethnic umbrella group
+  group_by(self_defined_ethnicity) %>% 
+  #sum the number of each ethnicity
+  tally() %>% print()
+  
+
+
+
+
+```
+Notes on above:
+- IF you want to summarize the individual ethnic bins then you can just add more to the mutate ifelse batch
+- Note that if there are no ethnicity matches to the categories, it outputs an NA
+- you need to add handling for the not-stated category in the data
+- What if we include the mixed race people within their most visible racial category? (ie. black, white, asian, other)
+
+Incongruencies (thigns in census data not in stop_search data):
+- Gypsy and Irish Traveller is not recorded as an option in the stop search ethnicity data
+- White: Roma
+- Any other ethnic background: Arab
+
+Things included in stop_search data but not in census data:
+- Other ethnic group: Not stated
+- NA
+
+Dealing with NA data:
+- Clearly state the proportion of stop and search records with missing ethnicity data in each district
+- Consider doing a sensitivity analysis - see how different approaches to handling NA data (including vs. excluding) affect your results
+- Discuss Potential Implications of NA data, are there any patterns (certain districts, time periods)
+
+Dealing with no location data:
+- This obviously makes the use of poly shapes less reliable
+- use a robustness check on the rates of stop/search within the ukc_stop_search no location function
+
+
+```{r}
+#NEXT STEPS
+
+# 1) Aggregate the necessary crime, ethnicity data in batches so you never store a full dataframe with all the information that is being analyzed in total
+
+# use the table in the folder on ethnicity statistics by local district area
+
+```
+
+
+```{r}
+#Pass the shs files as arguments to the API
+
+#ukc_stop_search_poly - see usage
+
+
+```
+
+
+Now to begin the data analysis
+
+```{r}
+#apply sf_simplify and st_transform to all the shape files
+local_districts_simp <- st_transform(st_simplify(local_districts, dTolerance = 50), crs = 4326)
+
+#create function that gets the monthly stop_search data for each local district
+
+get_stop_search_by_month <- function(search_month){
+  #create empty dataframe
+  stop_search_df <- data.frame()
+  #loop over all the local districts
+  for (i in 1:nrow(local_districts_simp)){
+    #pass to the API
+    data <- ukc_stop_search_poly(local_districts_simp[i,],search_month)
+    #append to the dataframe
+    stop_search_df <- rbind(stop_search_df, data)
+  }
+  return(stop_search_df)
+}
+
+for (i in 1:nrow(local_districts_simp)){
+  #convert to latlong
+  local_districts_simp_latlong <- st_transform(local_districts_simp, crs = 4326)
+  #pass to the API
+  data <- ukc_stop_search_poly(local_districts_simp_latlong[i,],"2022-01")
+  #save the data
+  save(data, file = paste0("C:\\Users\\rhrou\\OneDrive\\Desktop\\ASDS\\MY472\\MY472-Final\\usable_data\\",local_districts_simp_latlong$LAD22NM[i],".RData"))
+}
+
 
 
 ```
@@ -101,19 +589,44 @@ dim(crime_data)
 
 
 
-Section 3 - Analysis)
+```{r}
+age_gender_data <- read.csv("C:\\Users\\rhrou\\OneDrive\\Desktop\\ASDS\\MY472\\MY472-Final\\usable_data\\local_district_population_age_gender.csv")
+
+age_gender_districts <- unique(age_gender_data$Lower.tier.local.authorities.Code)
+
+ethnicity_data <- read.csv("C:\\Users\\rhrou\\OneDrive\\Desktop\\ASDS\\MY472\\MY472-Final\\usable_data\\ethnicity_data_pop_numbers.csv")
+
+ethnicity_districts <- unique(ethnicity_data$Area.code)
+
+shape_file_districts <- unique(local_districts$LAD22CD)
+
+#find the districts in age_gender_districts not in ethnicity_districts
+
+print(sum(shape_file_districts %in% ethnicity_districts == FALSE))
+
+print(local_districts$LAD22CD[local_districts$LAD22CD %in% age_gender_districts == FALSE])
+
+local_districts$LAD22CD %in% age_gender_districts
+
+print(sum(is.na(age_gender_data$Lower.tier.local.authorities.Code)))
+
+
+#remove all rows from local_districts which are not in age_gender_districts
+
+local_districts_test <- local_districts[local_districts$LAD22CD %in% unique(age_gender_data$Lower.tier.local.authorities.Code),]
 
 
 
-Important Notes:
-- Northern Ireland Police Service does not provide stop and search data
-
-Questions:
-- Do I cite the things that I need to cite
 
 
-Section 4 - Code Appendix
+ukc_stop_search_poly(local_districts_simp[286,],"2022-06")
 
+
+local_districts_simp[2,]$LAD22NM
+
+
+
+```
 
 
 
