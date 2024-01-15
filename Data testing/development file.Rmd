@@ -1,0 +1,323 @@
+---
+title: "MY472_Final_Testing"
+author: "Ryan"
+date: "01/01/2024"
+output: html_document
+---
+```{r}
+#load required packages
+library(ukpolice)
+library(tidyverse)
+library(sf)
+library(sp)
+library(httr)
+library(jsonlite)
+```
+
+```{r}
+#DATA LOADING
+
+#Age and Gender Population Data by Local District (downloaded from office for national statistics - 2021 data)
+age_gender_data <- read.csv("C:\\Users\\rhrou\\OneDrive\\Desktop\\ASDS\\MY472\\MY472-Final\\usable_data\\local_district_population_age_gender.csv")
+
+#Ethnicity Population Data by Local District
+ethnicity_data <- read.csv("C:\\Users\\rhrou\\OneDrive\\Desktop\\ASDS\\MY472\\MY472-Final\\usable_data\\ethnicity_data_pop_numbers.csv")
+
+#Local District Shape Files from GeoJSON
+local_districts <- st_read("C:\\Users\\rhrou\\OneDrive\\Desktop\\ASDS\\MY472\\MY472-Final\\usable_data\\local_authority_districts_shapefile.geojson")
+```
+
+Notes on above:
+- You'll have to replace the path with a path online - replicable - however all the data sources are the best available
+- Remember to change the above ethnicity_data path to an original data source - its currently on the data you've pre-edited
+
+
+```{r}
+#DATA CLEANING
+
+#LOCAL DISTRICT SHAPE FILES
+#Cleaning and formatting the local district shape file
+local_districts <- local_districts %>% 
+  #Filter out Scotland and Northern Ireland districts
+  filter(LAD22CD %in% unique(age_gender_data$Lower.tier.local.authorities.Code)==TRUE) %>% 
+  #Simplify the shape files to a level that enables us to pass them to the ukpolice API
+  st_simplify(dTolerance = 50) %>% 
+  #Transform to the lat-long coordinate system
+  st_transform(crs = 4326)
+
+#ETHNICITY DATA
+#Aggregating into the ethnic bins 
+ethnicity_data %>% 
+  #Remove all commas from the data
+  mutate_at(.vars = 2:21, .funs = ~gsub(",", "", .)) %>%
+  #convert columns to numeric
+  mutate_at(.vars = 3:21, .funs = as.numeric) %>% 
+  #convert NA to 0
+  mutate_at(.vars = 3:21, .funs = ~replace_na(., 0)) %>%
+  #add total population column
+  mutate(total_pop = rowSums(across(where(is.numeric)))) %>% 
+  #add Asian ethnicity column
+  mutate(asian_pop = rowSums(across(3:7))) %>% 
+  #Black ethnicity
+  mutate(black_pop = rowSums(across(8:10))) %>%
+  #Mixed Ethnicity
+  mutate(mixed_pop = rowSums(across(11:14))) %>%
+  #White Ethnicity
+  mutate(white_pop = rowSums(across(15:19))) %>%
+  #Other Ethnicity
+  mutate(other_pop = rowSums(across(20:21))) %>%
+  print()
+```
+
+Notes on above:
+- If you have time, rename all the variables to be consistent across all dataframes
+- Reference the fact that you tested the level of distortion so that it is not too extreme
+- If you have time, put all the data frames into a SQL database and query it for analyses where local district code is the primary key
+
+```{r}
+#SOME UNNECESSARY DISTORTION TESTING CODE
+original_df <- as.data.frame(st_geometry(test))
+simplified_df <- as.data.frame(st_geometry(simp_test))
+
+# Create a ggplot
+p1 <- ggplot() +
+      geom_sf(data = test, color = 'blue', fill = NA) +
+      ggtitle("Original Shape")
+
+p2 <- ggplot() +
+      geom_sf(data = simp_test, color = 'red', fill = NA) +
+      ggtitle("Simplified Shape")
+
+# Arrange plots side by side
+library(gridExtra)
+grid.arrange(p1, p2, ncol = 2)
+
+```
+
+
+```{r}
+
+#find all the different ethnicity types in the stop search data
+metro_force_data <- ukc_stop_search_force("metropolitan", "2021-06")
+ethnicity_bins <- unique(metro_force_data$self_defined_ethnicity)
+ethnicity_bins[is.na(ethnicity_bins)] <- "NA" #string representation of NA
+
+#Creating a dictionary of ethnicity to be used throughout analysis
+#Represents the 18 ethnicity bins used in the stop_search data
+ethnicity_dict <- c("NA" = "NA", "Other ethnic group - Not stated" = "NA", 
+                    "Black/African/Caribbean/Black British - African" = "black_african", 
+                    "Asian/Asian British - Pakistani" = "asian_pakistani", 
+                    "White - Any other White background" = "white_other", 
+                    "Asian/Asian British - Any other Asian background" = "asian_other", 
+                    "White - English/Welsh/Scottish/Northern Irish/British" = "white_british", 
+                    "Black/African/Caribbean/Black British - Any other Black/African/Caribbean background" = "black_other", 
+                    "Mixed/Multiple ethnic groups - White and Black Caribbean" = "mixed_white_black_caribbean", 
+                    "Other ethnic group - Any other ethnic group" = "other", 
+                    "Asian/Asian British - Indian" = "asian_indian", 
+                    "Mixed/Multiple ethnic groups - Any other Mixed/Multiple ethnic background" = "mixed_other", 
+                    "Black/African/Caribbean/Black British - Caribbean" = "black_carribean", 
+                    "Asian/Asian British - Chinese" = "asian_chinese", 
+                    "White - Irish" = "white_irish", 
+                    "Mixed/Multiple ethnic groups - White and Black African" = "mixed_white_black_african", 
+                    "Mixed/Multiple ethnic groups - White and Asian" = "mixed_white_asian", 
+                    "Asian/Asian British - Bangladeshi" = "asian_bangladeshi")
+
+#Constructing the data frames to store results by district
+NA_data_by_district_ethnicity <- as.tibble(data.frame(district_code = local_districts$LAD22CD, district_name = local_districts$LAD22NM))
+ss_by_district_race <- as.tibble(data.frame(district_code = local_districts$LAD22CD, district_name = local_districts$LAD22NM, total_stops = NA, white_stops = NA, asian_stops = NA, black_stops = NA, mixed_stops = NA, other_stops = NA))
+#ethnicity data by district
+ss_by_district_ethnicity <- as.tibble(data.frame(district_code = local_districts$LAD22CD, district_name = local_districts$LAD22NM))
+na_matrix <- matrix(NA, ncol = length(ethnicity_bins), nrow = 331)
+colnames(na_matrix) <- ethnicity_bins
+ss_by_district_ethnicity <- cbind(ss_by_district_ethnicity, na_matrix)
+                                      
+#BUILDING FUNCTION TO AGGREGATE THE DATA by LOCAL DISTRICT - STARTING WITH STOP-SEARCH RATES
+district_data <- ukc_stop_search_poly(local_districts[309,], "2021-06")
+
+#error handling
+if (is.null(district_data)) {
+  print("here")
+} else {
+    print("there")
+  }
+
+#
+NA_responses <- district_data %>%
+  #replace self defined ethnicity which is 'ethnicity not stated' as NA
+  mutate(self_defined_ethnicity = ifelse(grepl("Not stated", self_defined_ethnicity, fixed = TRUE), NA, self_defined_ethnicity)) %>% 
+  #filter for the rows with no racial/ethnicity data whatsoever
+  filter(is.na(self_defined_ethnicity) & is.na(officer_defined_ethnicity)) %>%
+  #create new column that defaults to self_defined_ethnicity unless is NA, then officer defined ethnicity
+  mutate(race = ifelse(is.na(self_defined_ethnicity), officer_defined_ethnicity, self_defined_ethnicity)) %>%
+  summarize(stops_w_missing_ethnicity = sum(is.na(race))) %>% 
+  mutate(district_code = local_districts[309,]$LAD22CD, district_name = local_districts[309,]$LAD22NM) %>%  #FORMAT LATER SO IT JUST REFERS TO THE DISTRICT BEING ITERATED OVER
+  print()
+
+#Add Na_responses to the NA_data_by_district_ethnicity data frame
+full_join(NA_data_by_district_ethnicity, NA_responses, by= "district_code") %>% print()
+
+
+district_ethnicity_data <- district_data %>% 
+  #remove rows with no ethnicity data
+  filter(is.na(self_defined_ethnicity)==FALSE | is.na(officer_defined_ethnicity)==FALSE) %>%
+  #replace self defined ethnicity which is 'ethnicity not stated' as NA
+  mutate(self_defined_ethnicity = ifelse(grepl("Not stated", NA, self_defined_ethnicity))) %>% 
+  #create new column that defaults to self_defined_ethnicity unless is NA, then officer defined ethnicity
+  mutate(ethnicity = ifelse(is.na(self_defined_ethnicity), officer_defined_ethnicity, self_defined_ethnicity)) %>% 
+  #Classify each search as its umbrella ethnicity group (ie. race)
+  mutate(umbrella_ethnicity = ifelse(grepl("White", ethnicity, fixed = TRUE), 'White',
+                             ifelse(grepl("Asian", ethnicity, fixed = TRUE), 'Asian',
+                             ifelse(grepl("Black", ethnicity, fixed = TRUE), 'Black',
+                             ifelse(grepl("Mixed", ethnicity, fixed = TRUE), 'Mixed',
+                             ifelse(grepl("Other", ethnicity, fixed = TRUE), 'Other', NA)))))) %>% 
+  #summarize the data
+  #count the number of instances of each ethnic umbrella group
+  group_by(umbrella_ethnicity) %>% 
+  #sum the number of each ethnicity
+  tally() %>% print()
+  
+  
+  
+district_ethnicity_data <- district_data %>% 
+  filter(is.na(self_defined_ethnicity)==FALSE | is.na(officer_defined_ethnicity)==FALSE) %>%
+  #create new column that defaults to self_defined_ethnicity, else officer defined ethnicity
+  mutate(ethnicity = ifelse(is.na(self_defined_ethnicity), officer_defined_ethnicity, self_defined_ethnicity)) %>% 
+  #Add an ethnic umbrella group indicator
+  mutate(umbrella_ethnicity = ifelse(grepl("White", ethnicity, fixed = TRUE), 'White',
+                                     ifelse(grepl("Asian", ethnicity, fixed = TRUE), 'Asian',
+                                     ifelse(grepl("Black", ethnicity, fixed = TRUE), 'Black',
+                                     ifelse(grepl("Mixed", ethnicity, fixed = TRUE), 'Mixed',
+                                     ifelse(grepl("Other", ethnicity, fixed = TRUE), 'Other', NA)))))) %>% 
+  #summarize the data
+  #count the number of instances of each ethnic umbrella group
+  group_by(self_defined_ethnicity) %>% 
+  #sum the number of each ethnicity
+  tally() %>% print()
+  
+
+
+
+
+```
+Notes on above:
+- If you want to summarize the individual ethnic bins then you can just add more to the mutate ifelse batch
+- Note that if there are no ethnicity matches to the categories, it outputs an NA
+- you need to add handling for the not-stated category in the data
+- What if we include the mixed race people within their most visible racial category? (ie. black, white, asian, other)
+
+Incongruencies (thigns in census data not in stop_search data):
+- Gypsy and Irish Traveller is not recorded as an option in the stop search ethnicity data
+- White: Roma
+- Any other ethnic background: Arab
+
+Things included in stop_search data but not in census data:
+- Other ethnic group: Not stated
+- NA
+
+Dealing with NA data:
+- Clearly state the proportion of stop and search records with missing ethnicity data in each district
+- Consider doing a sensitivity analysis - see how different approaches to handling NA data (including vs. excluding) affect your results
+- Discuss Potential Implications of NA data, are there any patterns (certain districts, time periods)
+
+Dealing with no location data:
+- This obviously makes the use of poly shapes less reliable
+- use a robustness check on the rates of stop/search within the ukc_stop_search no location function
+
+
+```{r}
+#NEXT STEPS
+
+# 1) Aggregate the necessary crime, ethnicity data in batches so you never store a full dataframe with all the information that is being analyzed in total
+
+# use the table in the folder on ethnicity statistics by local district area
+
+```
+
+
+```{r}
+#Pass the shs files as arguments to the API
+
+#ukc_stop_search_poly - see usage
+
+
+```
+
+
+Now to begin the data analysis
+
+```{r}
+#apply sf_simplify and st_transform to all the shape files
+local_districts_simp <- st_transform(st_simplify(local_districts, dTolerance = 50), crs = 4326)
+
+#create function that gets the monthly stop_search data for each local district
+
+get_stop_search_by_month <- function(search_month){
+  #create empty dataframe
+  stop_search_df <- data.frame()
+  #loop over all the local districts
+  for (i in 1:nrow(local_districts_simp)){
+    #pass to the API
+    data <- ukc_stop_search_poly(local_districts_simp[i,],search_month)
+    #append to the dataframe
+    stop_search_df <- rbind(stop_search_df, data)
+  }
+  return(stop_search_df)
+}
+
+for (i in 1:nrow(local_districts_simp)){
+  #convert to latlong
+  local_districts_simp_latlong <- st_transform(local_districts_simp, crs = 4326)
+  #pass to the API
+  data <- ukc_stop_search_poly(local_districts_simp_latlong[i,],"2022-01")
+  #save the data
+  save(data, file = paste0("C:\\Users\\rhrou\\OneDrive\\Desktop\\ASDS\\MY472\\MY472-Final\\usable_data\\",local_districts_simp_latlong$LAD22NM[i],".RData"))
+}
+
+
+
+```
+
+
+
+
+```{r}
+age_gender_data <- read.csv("C:\\Users\\rhrou\\OneDrive\\Desktop\\ASDS\\MY472\\MY472-Final\\usable_data\\local_district_population_age_gender.csv")
+
+age_gender_districts <- unique(age_gender_data$Lower.tier.local.authorities.Code)
+
+ethnicity_data <- read.csv("C:\\Users\\rhrou\\OneDrive\\Desktop\\ASDS\\MY472\\MY472-Final\\usable_data\\ethnicity_data_pop_numbers.csv")
+
+ethnicity_districts <- unique(ethnicity_data$Area.code)
+
+shape_file_districts <- unique(local_districts$LAD22CD)
+
+#find the districts in age_gender_districts not in ethnicity_districts
+
+print(sum(shape_file_districts %in% ethnicity_districts == FALSE))
+
+print(local_districts$LAD22CD[local_districts$LAD22CD %in% age_gender_districts == FALSE])
+
+local_districts$LAD22CD %in% age_gender_districts
+
+print(sum(is.na(age_gender_data$Lower.tier.local.authorities.Code)))
+
+
+#remove all rows from local_districts which are not in age_gender_districts
+
+local_districts_test <- local_districts[local_districts$LAD22CD %in% unique(age_gender_data$Lower.tier.local.authorities.Code),]
+
+
+
+
+
+ukc_stop_search_poly(local_districts_simp[286,],"2022-06")
+
+
+local_districts_simp[2,]$LAD22NM
+
+
+
+```
+
+
+

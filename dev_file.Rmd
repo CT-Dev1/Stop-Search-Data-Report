@@ -29,7 +29,6 @@ What is bias in this context?
 
 What are 'reasonable grounds' for stop and search? How can we measure their occurrence relative to any affect of bias?
 
-
 What are the key statistical aspects of bias?
 
 1) Disproportionality - Are certain groups searched at rates disproportionate to their representation in the population OR to the crime rates associated with that group?

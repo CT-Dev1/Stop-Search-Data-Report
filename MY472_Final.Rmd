@@ -20,7 +20,8 @@ library(RSQLite)
 library(httr)
 library(netstat)
 library(texreg)
-library(gtsummary)
+library(gt)
+#library(gtsummary)
 ```
 
 ```{r load_data, eval = TRUE}
@@ -57,6 +58,11 @@ ethnicity_by_force <- LSOA_by_force %>%
   mutate(force_name = str_replace_all(force_name, " Police", "")) %>%
   summarize(across(where(is.numeric), sum, na.rm = TRUE))
 
+#Formatting force shape files to fit common coding
+pf_shapes <- pf_shapes %>% 
+  rename(force_name = pfa16nm) %>% 
+  mutate(force_name = ifelse(force_name=="Metropolitan Police", "Metropolitan", force_name))
+
 ```
 
 ```{r get_ss_data, eval = TRUE}
@@ -82,6 +88,7 @@ clean_ss_data <- function(ss_data, force, month) {
     mutate(ukc_input = force) %>% 
     inner_join(police_forces, by = "ukc_input") %>% 
     select(age_range, gender, self_defined_ethnicity, officer_defined_ethnicity, legislation, object_of_search, outcome_object_name, legislation, force_code, force_name, ukc_input) %>% 
+    #replace "Not stated" ethnicity with NA
     mutate(self_defined_ethnicity = ifelse(grepl("Not stated", self_defined_ethnicity), NA, self_defined_ethnicity)) %>% 
     mutate(racial_group = ifelse(is.na(self_defined_ethnicity), officer_defined_ethnicity, self_defined_ethnicity)) %>% 
     #Add column for racial_group based on ethnicity classification
@@ -95,7 +102,7 @@ clean_ss_data <- function(ss_data, force, month) {
 }
 
 #Script to download stop and search data for all police forces over 2022
-'
+
 #Empty tibble to store the data
 stop_search_2022 <- ukc_stop_search_force("bedfordshire","2022-01") %>%
   clean_ss_data("bedfordshire", "2022-01") %>%
@@ -103,7 +110,7 @@ stop_search_2022 <- ukc_stop_search_force("bedfordshire","2022-01") %>%
 
 #table to store missing forces and months
 missing_data = tibble(ukc_input = character(), month = character())
-
+'
 #Loop over all police forces and months
 for (month in dates){
   for (force in police_forces$ukc_input){
@@ -155,19 +162,11 @@ for (force in forward_prop_input$ukc_input){
 }
 
 #Write to disk, this is commented out, data is stored in stop_search_2022.csv in data folder (within the github)
-write_csv(stop_search_2022, "stop_search_2022.csv")
-'
-```
+#write_csv(stop_search_2022, "stop_search_2022.csv")
 
 
-```{r load_ss_data, eval = TRUE}
-#Load full dataset from csv, which is only missing data for Greater Manchester, Gwent and North Yorkshire, these I add manually at later stages
-stop_search_2022 <- read_csv("data//stop_search_2022.csv")
-```
+#test that forward filling worked using the test case of South Wales, which previously had some missing data
 
-```{r missing_data_test, eval = FALSE}
-#test that forward propagation worked using the test case of South Wales, which previously had some missing data
-'
 stop_search_2022 %>% 
   filter(force_name == "South Wales") %>% 
   group_by(month) %>% 
@@ -181,32 +180,32 @@ print(is.null(json)|length(json)==0)
 '
 ```
 
-```{r total_missing_data_fill, eval = TRUE}
-#North Yorkshire, Gwent and Greater Manchester have no ethnicity data at all for any period
-#Given this, can extract from alternative data source, Home office stop and search by ethnicity of 2022
+```{r load_ss_data, eval = TRUE}
+#Load full dataset from csv
+stop_search_2022 <- read_csv("data//stop_search_2022.csv")
 
-#download this missing data from gov.uk - this was done previously, data stored in missing_forces_stop_search.csv
-
-#url <- "https://www.ethnicity-facts-figures.service.gov.uk/crime-justice-and-the-law/policing/stop-and-search/latest/downloads/stop-and-search-#data-2006-2022.csv"
-#download.file(url, destfile = "missing_forces_stop_search.csv")
+#Manchester, Gwent and North Yorkshire have no data at all
+#Rather than exclude from analysis, we can load in existing racial search data from gov.uk
 missing_forces_ss <- read.csv("data/missing_forces_stop_search.csv")
-
-#Process the data to filter for the missing police forces, keep it for later use to input missing data
-#Full data set
-missing_forces_to_input <- missing_forces_ss %>% 
-  rename(number_of_stop_and_searches_ethnicity_reported = total_number_of_stop_and_search_carried_out_in_this_year_in_this_area_excluding_cases_where_the_ethnicity_was_unreported, stop_search_rate_ethnicity = proportion_of_total_stop_and_searches_of_this_ethnicity_in_the_financial_year_excludes_unreported) %>%
+missing_forces_ss <- missing_forces_ss %>% 
+  rename(number_of_stop_and_searches_ethnicity_reported = total_number_of_stop_and_search_carried_out_in_this_year_in_this_area_excluding_cases_where_the_ethnicity_was_unreported, stop_search_rate_ethnicity = proportion_of_total_stop_and_searches_of_this_ethnicity_in_the_financial_year_excludes_unreported, force_name = geography) %>%
   mutate(time = as.character(time)) %>% 
-  filter(geography %in% c("Gwent", "Greater Manchester", "North Yorkshire")==TRUE) %>% 
+  filter(force_name %in% c("Gwent", "Greater Manchester", "North Yorkshire")==TRUE) %>% 
   filter(geography_type == "Police Force Area" & time == "2021/22") %>% 
-  select(ethnicity, geography, number_of_stop_and_searches, number_of_stop_and_searches_ethnicity_reported, population_by_ethnicity, rate_per_1_000_population_by_ethnicity, stop_search_rate_ethnicity)
+  #Note ethnicity column is coded differently in this dataset, includes labels for ethnicity and race
+  select(ethnicity, force_name, number_of_stop_and_searches, number_of_stop_and_searches_ethnicity_reported, population_by_ethnicity, rate_per_1_000_population_by_ethnicity, stop_search_rate_ethnicity)
 
-#Total rate by force (for Gwent, Manchester, N Yorkshire)
-missing_forces_ss_rate <- missing_forces_to_input %>% 
-  select(ethnicity, geography, population_by_ethnicity, number_of_stop_and_searches)
+#Now we can combine these datasets to have a complete picture across all force areas
+
 ```
 
+Notes on missing data source:
+- Is for financial year 2021-22, so not exactly calendar year but a good approximation
+
 ```{r ss_by_race_tables, eval = TRUE}
-#race populations by force area
+#Begin by analyzing race
+
+#To find search rate per 1000, first we need populations by force area
 race_by_force <- ethnicity_by_force %>% 
   pivot_longer(cols = -c(force_code,force_name), names_to = "racial_group", values_to = "population") %>% 
   mutate(racial_group = ifelse(grepl("White", racial_group, fixed = TRUE), 'White',
@@ -221,61 +220,150 @@ race_by_force <- ethnicity_by_force %>%
   mutate(population_Total = population_White + population_Black + population_Mixed + population_Asian + population_Other) %>%
   inner_join(police_forces, by = "force_name")
 
-#rate of stop and search by race
-race_stops_data <- stop_search_2022 %>% 
-  mutate(self_defined_ethnicity = ifelse(grepl("Not stated", self_defined_ethnicity), NA, self_defined_ethnicity)) %>% 
-  filter(is.na(self_defined_ethnicity)==FALSE) %>%
+#First let's find the number of stops by race for the three missing forces (Manchester, Gwent and North Yorkshire)
+race_stops_data_missing <- missing_forces_ss %>% 
+  filter(ethnicity %in% c("White", "Black", "Mixed", "Asian", "Other")==TRUE) %>% 
+  select(c(number_of_stop_and_searches, ethnicity, force_name)) %>% 
+  pivot_wider(names_from = ethnicity, values_from = number_of_stop_and_searches, names_prefix = "stops_")
+
+#Next lets find the total searches by force area, including those with no racial data
+stops_total_by_force <- stop_search_2022 %>% 
   group_by(force_name) %>% 
-  summarize(total_stops_ethnicity_reported = n(), black_stops = sum(racial_group=="Black"), white_stops = sum(racial_group=="White"), mixed_stops = sum(racial_group=="Mixed"), asian_stops = sum(racial_group=="Asian"), other_stops = sum(racial_group=="Other")) %>%  
+  summarize(number_of_stop_and_searches = n()) %>% 
+  inner_join(police_forces, by = "force_name") %>% 
+  bind_rows(missing_forces_ss) %>% 
+  #get first 43 rows
+  slice(1:43) %>%
+  select(force_name, number_of_stop_and_searches) %>%
+  rename(stops_Total = number_of_stop_and_searches)
+
+#Finally, lets aggregate all tables, finding racial stop rates for each force - FINAL RACIAL DATA
+race_stops_data <- stop_search_2022 %>% 
+  #Filter for stops where racial group is known
+  filter(is.na(racial_group)==FALSE) %>% 
+  group_by(force_name) %>% 
+  summarize(stops_Black = sum(racial_group=="Black"), stops_White = sum(racial_group=="White"), stops_Mixed = sum(racial_group=="Mixed"), stops_Asian = sum(racial_group=="Asian"), stops_Other = sum(racial_group=="Other")) %>% 
+  #Add the missing forces
+  rbind(race_stops_data_missing) %>%
+  mutate(stops_All = stops_Black + stops_White + stops_Mixed + stops_Asian + stops_Other) %>%
   inner_join(police_forces, by = "force_name") %>%
-  inner_join(race_by_force, by = c("force_name","force_code")) %>% 
-  mutate(stop_rate_black = (black_stops/population_Black)*1000, stop_rate_white = (white_stops/population_White)*1000, stop_rate_mixed = (mixed_stops/population_Mixed)*1000, stop_rate_asian = (asian_stops/population_Asian)*1000, stop_rate_other = (other_stops/population_Other)*1000, stop_rate_total = (total_stops_ethnicity_reported/population_Total)*1000)
+  inner_join(race_by_force, by = c("force_name","force_code","ukc_input")) %>%
+  #Find rates of stop and search per 1000 people
+  inner_join(stops_total_by_force, by = "force_name") %>% 
+  mutate(stop_rate_black = (stops_Black/population_Black)*1000, stop_rate_white = (stops_White/population_White)*1000, stop_rate_mixed = (stops_Mixed/population_Mixed)*1000, stop_rate_asian = (stops_Asian/population_Asian)*1000, stop_rate_other = (stops_Other/population_Other)*1000, stop_rate_all_races = (stops_All/population_Total)*1000, stops_rate_Total = (stops_Total/population_Total)*1000) 
 ```
-- add number of stop and searches no ethnicity reported
+
 -note that the rate is based on the number of stops where ethnicity is reported, this can change the rate significantly
 - in the above, the total stop and searches are those with no ethnicity reported
 
 ```{r visualize_total_ss_rate, eval=TRUE}
-#Visualizing search rate by police force area
+#We can visualize the above table on a map to get a better sense of geographic variation
 
-#total stops by force for N yorkshire, Gwent and Greater Manchester (The missing data)
-total_stops_man_gwent_yorkshire <- missing_forces_to_input %>% 
-  select(geography, number_of_stop_and_searches, ethnicity) %>%
-  group_by(geography) %>%
-  summarize(total_stops = sum(number_of_stop_and_searches[ethnicity == ethnicity])) %>% 
-  rename(force_name = geography)
-
-#Total stops by force (complete data)
-ss_rate_by_force <- stop_search_2022 %>% 
-  group_by(force_name) %>%
-  summarize(total_stops = n()) %>% 
-  rbind(total_stops_man_gwent_yorkshire) %>% 
-  inner_join(race_by_force, by = c("force_name")) %>%
-  mutate(stop_rate_total = (total_stops/population_Total)*1000) %>%
-  select(force_name, stop_rate_total) %>% 
-  #Exclude City of London, as it is an outlier, it skews the graph range, mkaing variability invisible
-  filter(force_name != "City of London")
-
-#Generating the visualization data, combining with the force shapefile dataframe
-map_data <- pf_shapes %>% 
-  rename(force_name = pfa16nm) %>% 
-  mutate(force_name = ifelse(force_name=="Metropolitan Police", "Metropolitan", force_name)) %>%
+total_stop_rate_map <- pf_shapes %>% 
+  inner_join(race_stops_data, by = c("force_name")) %>%
+  select(force_name, stops_rate_Total) %>%
+  #Filter out city of london as outlier
   filter(force_name != "City of London") %>%
-  inner_join(ss_rate_by_force, by = "force_name")
-
-#creating visualization map of England and Wales
-map1 <- ggplot(map_data, aes(fill = stop_rate_total)) +
-  geom_sf() +
-  scale_fill_viridis_c(option = "plasma", direction = -1, na.value = "grey90", name = "Stop and search rate per 1000 people") +
+  ggplot(aes(fill = stops_rate_Total)) + geom_sf() +
+  scale_fill_viridis_c(option = "plasma", direction = -1, na.value = "grey90", name = "Total searches per 1000 residents") +
   theme_void() +
   theme(legend.position = "bottom") +
-  labs(title = "Stop and Search Rate by Police Force Area", subtitle = "2021/22", caption = "Source: Police.uk, 2022, based on number of searches that recorded racial/ethnicity data")
+  labs(title = "Stop and Search Rate by Police Force Area", subtitle = "2022", caption = "Source: police.uk | Based on Total Searches Conducted")
 
-map1  #display the map
+total_stop_rate_map
+```
+-Exclude city of london from further estimates
+
+
+```{r visualize_total_ss_rate, eval=TRUE}
+#Now we can visualize the racial search data
+
+#Summary table - race stop rates by force
+race_stops_data %>% 
+  select(force_name, stop_rate_black, stop_rate_white, stop_rate_mixed, stop_rate_asian, stop_rate_other, stop_rate_all_races, stops_rate_Total) %>%
+  rename("Police Force" = force_name, Black = stop_rate_black, White = stop_rate_white, Mixed = stop_rate_mixed, Asian = stop_rate_asian, Other = stop_rate_other, "All Races*" = stop_rate_all_races, "Total Stops**" = stops_rate_Total) %>%
+  gt() %>% 
+  fmt_number(columns = c(everything()), decimals = 2) %>%
+  tab_header(title = md("**Rates of Stop and Search by Racial Group and Police Force Area**")) %>% tab_spanner(label = md("**Rate per 1000 Residents in 2022**"), columns = c(2:8)) %>% 
+  opt_row_striping() %>% 
+  tab_footnote(
+    footnote = "
+    *'All Races' is the rate for all stops where racial data is recorded | **'Total stops' is the rate for all stops recorded"
+  ) %>% 
+  tab_style(
+    style = list(cell_text(weight = "bold")),
+    locations = list(cells_column_labels(columns = everything()), cells_body(columns = c(1))))
+```
+FORMAT PAPER --> https://www.ethnicity-facts-figures.service.gov.uk/crime-justice-and-the-law/policing/stop-and-search/latest/
+
+
+Notes on table above:
+- Demonstrates stop and search rate varies significantly across areas
+- Gives the outlier of City of London - it should be removed from further analysis
+- Note that all races stop rate may be smaller than official statistics given that we are analysing on searches where race is known
+- add column for demographic - number of total searches and population
+
+
+```{r visualize_black_ss_rate, eval=TRUE}
+library(viridis)
+black_stop_rate_map <- pf_shapes %>% 
+  inner_join(race_stops_data, by = c("force_name")) %>%
+  select(force_name, stop_rate_black, stop_rate_white) %>% 
+  mutate(black_white_ratio = stop_rate_black/stop_rate_white) %>%
+  #black_white_ratio defaults to 5 when above 5 for the graphical representation
+  #mutate(black_white_ratio = ifelse(black_white_ratio > 5, 5, black_white_ratio)) %>%
+  mutate(black_white_ratio = log(black_white_ratio)) %>%
+  filter(force_name != "City of London") %>%
+  ggplot(aes(fill = black_white_ratio)) + 
+  geom_sf() +
+  scale_fill_viridis_c(
+    option = "plasma", 
+    direction = -1, 
+    na.value = "red", 
+    name = "Log Likelihood of Stop-and-Search for Black vs. White",
+    trans = "identity",
+    limits = c(0, 3),
+    breaks = c(0, 1, 2, 3) 
+  ) +
+  theme_void() +
+  theme(legend.position = "bottom") +
+  labs(title = "Difference in Search Rates by Force Area: Black vs. White", subtitle = "2022", caption = "Source: police.uk | Based on Total Stops Conducted | Log Likelihood of 0 represents 1:1 chance of being stopped")
+black_stop_rate_map
+```
+- Fix the above map caption etc. - CENTRE THE TITLE
+- Change the above to have a logarithmic scale instead of log variable
+
+
+Now to address some summary statistics
+```{r}
+#Statistics on stop rate
+stats_ss_table <- stop_search_2022 %>% 
+  summarize(
+    total_stops = n(),
+    
+  )
+
+
+#
+
+
+
+
 ```
 
-Notes on above:
-- We exclude the City of London due to the number of people who visit compared to the small number of people who live there
+
+
+
+
+```{r}
+#Ethnicity analysis data set
+
+
+
+```
+
+
+
 
 
 Now, to run some statistical tests using linear regression
@@ -286,22 +374,22 @@ race_stops_data_long <- race_stops_data %>%
   rename(Black = stop_rate_black, White = stop_rate_white, Mixed = stop_rate_mixed, Asian = stop_rate_asian, Other = stop_rate_other) %>%
   pivot_longer(cols = c(Black, White, Mixed, Asian, Other), names_to = "racial_group", values_to = "stops_rate_per_1000") %>% print()
 
-#Data for regression - total population = the 
+#Data for regression - on searches in stop_search_2022, ie. not including the missing forces
 regression_data <- stop_search_2022 %>% 
-  mutate(self_defined_ethnicity = ifelse(grepl("Not stated", self_defined_ethnicity), NA, self_defined_ethnicity)) %>% 
-  filter(is.na(self_defined_ethnicity)==FALSE) %>%
+  filter(is.na(racial_group)==FALSE) %>%
   inner_join(race_stops_data_long, by = c("racial_group","force_name")) %>% 
   filter(force_name != "City of London") %>%
   mutate(racial_group = as_factor(racial_group), force_name = as_factor(force_name)) %>% 
   rename(Male = gender) %>% 
   mutate(Male = ifelse(Male == "Male", 1, 0)) 
 
+
 #Multiple Linear Regression model, finding effect of race, force area, male gender on likelihood of being stopped 
 #set the reference groups to be white for racial group and Kent for force area, as it has near-average stop and search rate (6.78 per 1000)
 reg1 <- lm(stops_rate_per_1000 ~ relevel(racial_group, ref="White") + relevel(force_name, ref="Kent") + Male, data = regression_data)
 
 #Tidy Present
-tbl_regression(reg1)
+screenreg(reg1)
 ```
 
 
@@ -433,7 +521,7 @@ ethnicity_dict <- c("NA" = "NA", "Other ethnic group - Not stated" = "NA",
 
 #Constructing the data frames to store results by district
 NA_data_by_district_ethnicity <- as.tibble(data.frame(district_code = local_districts$LAD22CD, district_name = local_districts$LAD22NM))
-ss_by_district_race <- as.tibble(data.frame(district_code = local_districts$LAD22CD, district_name = local_districts$LAD22NM, total_stops = NA, white_stops = NA, asian_stops = NA, black_stops = NA, mixed_stops = NA, other_stops = NA))
+ss_by_district_race <- as.tibble(data.frame(district_code = local_districts$LAD22CD, district_name = local_districts$LAD22NM, total_stops = NA, stops_White = NA, stops_Asian = NA, stops_Black = NA, stops_Mixed = NA, stops_Other = NA))
 #ethnicity data by district
 ss_by_district_ethnicity <- as.tibble(data.frame(district_code = local_districts$LAD22CD, district_name = local_districts$LAD22NM))
 na_matrix <- matrix(NA, ncol = length(ethnicity_bins), nrow = 331)
