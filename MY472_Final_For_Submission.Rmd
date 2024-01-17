@@ -10,7 +10,7 @@ knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
 
 # Investigation into UK Police Stop and Search Bias
 
-## Github Link: https://github.com/CT-Dev1/MY472-Final
+### Github Link: https://github.com/CT-Dev1/MY472-Final
 
 ```{r load_packages, eval = TRUE}
 #Load required packages
@@ -211,6 +211,32 @@ stop_search_2022 %>%
 stop_search_2022 <- read_csv("data//stop_search_2022.csv")
 ```
 
+## Introduction
+
+UK Police rely on 'reasonable suspicion' of illegal behavior to warrant a stop-and-search. Compared with other policing practices, the level of oversight for stop-and-search is comparatively low (Borooah, 2021), which raises the question: what extent of bias pervades officers' selection of individuals for stop-and-search? 
+
+Bias is defined as the disproportionate use of stop-and-search on a specific group relative to their proportion of the population. Bias may be indicative of discrimination and profiling by police, and it suggests a measure of unfair treatment. Yet, some suggest that strategic profiling is necessary for effective policing, so bias should be interpreted within its wider context (Petherick and Brooks, 2021). 
+
+The aim of this analysis is to assess stop-and-search bias by comparing the proportion of searches on a specific group relative to their proportion of the population. Where appropriate, this analysis will be conducted at the national, regional and local levels, controlling for geographic variances that may distort the measurement of bias. The primary demographics examined are age-group, sex, racial groups, investigating which groups experience more or less searches compared to population proportions.
+
+## Data
+
+### Stop-and-Search Data
+
+A near-complete dataset of searches is extracted from the police.uk API for calendar year 2022 at the level of police force areas (PFAs), including information on ethnicity, age and gender. Missing data is either: (i) inputted using forward filling, which is used to retain accurate estimates of full-year search rates; or (ii), when PFAs have no 2022 data, data is inputted from an alternative source at gov.uk. A final dataset of 496,593 searches is produced for analysis. 
+
+### Demographic Data
+
+Population data is manually sourced from the 2021 Census from the Office of National Statistics (ONS) at 2 geographic levels: national (England and Wales) and lower super output areas (LSOAs). These are aggregated into total populations at middle super output area (MSOA) and PFA levels to estimate corresponding rates of stop-and-search by population. Racial data is known for 478,357 (94.71%) of available searches, compiled into a summary table of search rates by racial group. 
+
+### Geographic Data
+
+Geographic shapefile data is downloaded from geoportal.statistics.gov.uk, used for spatial and population transformations in visualizing and joining location data on the level of MSOA, LSOA, PFA.
+
+## Analysis
+
+### Figure 1: Proportion of stop and search by age and sex of person compared with the population, England and Wales, 2022
+
 ```{r sex_and_age_data_analysis}
 #Now we have the full dataset, we can begin to analyse the data
 #First off, analysing age and sex of those stopped and searched 
@@ -255,23 +281,25 @@ age_sex_stops_population <- stops_by_age_and_sex %>%
 #This serves to compare rates of searches against proportion of the population for gender and age group
 stops_by_age_and_sex_histogram <- age_sex_stops_population %>% 
   ggplot(aes(x = age_range, y = percentage, fill = gender)) +
-  geom_bar(stat = "identity", position = "stack", width = 0.50) +
+  geom_bar(stat = "identity", position = "stack", width = 0.60) +
   scale_y_continuous(breaks = seq(-60, 60, by = 10), labels = abs(seq(-60,60,by=10)), limits = c(-60,60)) +
   geom_hline(yintercept = 0, linetype = "solid", color = "black", size = 1) +
   coord_flip() +
   scale_fill_manual(values = c("population-Female" = "skyblue", "stops-Female" = "skyblue", "population-Male" = "skyblue4", "stops-Male" = "skyblue4"),
                       breaks = c("population-Female", "population-Male"),
                       labels = c("Female", "Male")) + 
-  theme(aspect.ratio = 3/9, axis.text.y = element_text(angle = 0, hjust = 1)) +
+  theme(aspect.ratio = 4/9, axis.text.y = element_text(angle = 0, hjust = 1)) +
   ylab("Percent") +
   xlab("Age Group") +
-  ggtitle(str_wrap("Proportion of stop and search by age and sex of person compared with the population", width=80), "England and Wales | 2022 | Based on 426,768 total searches") +
-  annotate("text", x = 1, y = 50, label = "Proportion of Stop\nand Search in each \nage group", vjust = -1, size = 3) +
-  annotate("text", x = 1, y = -30, label = "Proportion of \nPopulation in each \nage group", vjust = -1, size = 3) +
+  annotate("text", x = 1, y = 50, label = "Proportion of Stop\nand Search in each \nage group", vjust = -1, size = 3.5) +
+  annotate("text", x = 1, y = -35, label = "Proportion of \nPopulation in each \nage group", vjust = -1, size = 3.5) +
+  annotate("text", x = 0.1, y = 35, label = "Based on 426,768 observed searches", vjust = -1, size = 3.5) +
   labs(fill = "Sex")
   
 stops_by_age_and_sex_histogram
 ```
+
+Given figure 1, a high majority of searches target males, across all age_groups, and typically at a rate that is higher than their proportion of the population. Males aged 18-24 represent 28.4% of searches in 2022, yet only 4.2% of the population, a disparity of 6.8 times. Conversely, women are represented near their population proportions in youth, but as they age, become significantly less represented in search statistics. 
 
 ```{r racial_analysis_data_for_missing_forces, eval = TRUE}
 #Further age/gender visualizations could be generated, however the robustness of the national trend is clear
@@ -345,6 +373,7 @@ race_stops_data <- stop_search_2022 %>%
   mutate(stop_rate_black = (stops_Black/population_Black)*1000, stop_rate_white = (stops_White/population_White)*1000, stop_rate_mixed = (stops_Mixed/population_Mixed)*1000, stop_rate_asian = (stops_Asian/population_Asian)*1000, stop_rate_other = (stops_Other/population_Other)*1000, stop_rate_all_races = (stops_All/population_Total)*1000, stops_rate_Total = (stops_Total/population_Total)*1000) 
 ```
 
+### Figure 2: Map of stop and search per 1000 population, Police Force Area, England and Wales, 2022
 
 ```{r map_total_search_rate_by_force, eval=TRUE}
 #Now we can visualize the total search rate by force on a map by joining with PFA shapefiles
@@ -365,18 +394,21 @@ total_stop_rate_map <- pf_shapes %>%
   scale_fill_viridis_c( 
                        direction = -1, 
                        na.value = "grey90", 
-                       name = str_wrap("Total searches per 1000 Population", width = 15), 
+                       name = str_wrap("Searches per 1000 population", width = 15), 
                        trans = "identity") +
   theme_void() +
   theme(legend.position = "right") +
-  labs(title = "Search Rate by Police Force Area", subtitle = "2022", caption = "Source: police.uk | Based on 507,381 Total Searches") +
+  labs(caption = "Source: police.uk | Based on 507,381 Total Searches") +
   geom_sf(data = uk_cities, color = "red2", size = 2.6) +
   annotate("text", x = 180050.1, y = 480358.4, label = str_wrap("Dots Represent Cities with Population > 500,000",width=20), size = 3)
 total_stop_rate_map
 ```
+
+### Figure 3: Stop and search per 1000 population, Police Force Area, England and Wales, 2022
+
 ```{r bar_plot_search_rate_by_PFA, eval=TRUE}
-#The map is a good indicator of geographic-level trends but it is difficult to measure magnitude of difference
-#A barplot serves this function
+#The map is a good indicator of geographic-level trends but it is difficult to measure magnitude of differences
+#A bar plot serves this function better
 
 #Displaying via histogram
 ss_rate_by_force <- race_stops_data %>% 
@@ -398,14 +430,15 @@ total_stop_rate_histogram <- ggplot(ss_rate_by_force, aes(x = force_name, y = st
         panel.grid.major = element_line(color = "gray", size = 0.5), # Add major grid lines
         panel.grid.minor = element_blank(), # Disable minor grid lines
         panel.background = element_rect(fill = "white"),axis.line = element_line(color = "black")) +  # Add axis lines
-  labs(title = "Search Rate by Police Force Area",
-       subtitle = "England and Wales, 2022",
+  labs(
        x = "Police Force Area (PFA)",
        y = "Searches per 1000 Residents")
 total_stop_rate_histogram
 ```
 
+Figures 2 and 3 indicate that location substantially mediates one's experience of stop and search on the national level. Certain urban zones, including London and Liverpool (Merseyside), have higher search rates on average. This location effect necessitates controlling for PFA in analysis of racial disparity in stop and search; it reveals location as significant in expected rate of stop and search.
 
+### Figure 4: Stop and search per 1000 population by Racial Group, Police Force Area, England and Wales, 2022
 
 ```{r table_of_search_rate_by_race_PFA, eval=TRUE}
 #It's clear that there is a large variation in search rates by force, now let's examine how racial disparity varies across forces
@@ -413,10 +446,10 @@ total_stop_rate_histogram
 #Summary table - race stop rates by force
 race_stops_data %>% 
   select(force_name, stop_rate_black, stop_rate_white, stop_rate_mixed, stop_rate_asian, stop_rate_other, stop_rate_all_races, stops_rate_Total) %>%
-  rename("Police Force" = force_name, Black = stop_rate_black, White = stop_rate_white, Mixed = stop_rate_mixed, Asian = stop_rate_asian, Other = stop_rate_other, "All Races*" = stop_rate_all_races, "Total Stops**" = stops_rate_Total) %>%
+  rename("Police Force Area (PFA)" = force_name, Black = stop_rate_black, White = stop_rate_white, Mixed = stop_rate_mixed, Asian = stop_rate_asian, Other = stop_rate_other, "All Races*" = stop_rate_all_races, "Total Stops**" = stops_rate_Total) %>%
   gt() %>% 
   fmt_number(columns = c(everything()), decimals = 2) %>%
-  tab_header(title = md("**Rates of Stop and Search by Racial Group and Police Force Area**")) %>% tab_spanner(label = md("**Rate per 1000 Residents in 2022**"), columns = c(2:8)) %>% 
+  tab_spanner(label = md("**Rate per 1000 Population in 2022**"), columns = c(2:8)) %>% 
   opt_row_striping() %>% 
   tab_footnote(
     footnote = "
@@ -427,8 +460,11 @@ race_stops_data %>%
     locations = list(cells_column_labels(columns = everything()), cells_body(columns = c(1))))
 ```
 
+Figure 4 demonstrates a significant racial disparity in stop-and-search rates after controlling for PFA. Generally, Mixed, Other and Asian are searched at a higher rate than White, and Black is searched at the highest rate, in every PFA in England and Wales.
+
+### Figure 5: Racial Disparity in Stop and Search Rate, Police Force Area, England and Wales, 2022
 ```{r map_racial_disparity_rate, eval=TRUE}
-#The table is very informative, but it's difficult to capture exact trends across forces
+#The table is informative, but it's difficult to capture exact trends across forces
 #Appears the Black vs. White gap is significant, it is worth visualizing racial disparity (the ratio of black to white stop rates)
 
 #Generating map of racial disparity by PFA
@@ -444,7 +480,7 @@ black_stop_rate_map <- pf_shapes %>%
   scale_fill_viridis_c(
     direction = -1, 
     na.value = "red", 
-    name = str_wrap("Search Disparity Rate", width=15),
+    name = str_wrap("Search Disparity Rate for Black compared to White", width=15),
     trans = "identity",
     limits = c(0, 8),
     breaks = c(0, 2, 4, 6, 8),
@@ -452,13 +488,14 @@ black_stop_rate_map <- pf_shapes %>%
   ) +
   theme_void() +
   theme(legend.position = "right") +
-  labs(title = str_wrap("Disparity Rate for Black Racial Group compared to White", width = 35), subtitle = "England and Wales PFAs | 2022", caption = "Source: police.uk | Based on 485,930 Searches") +
+  labs( caption = "Source: police.uk") +
   #Once again, add the cities to the map, to see if urbanization may be a factor in racial biasing
   geom_sf(data = uk_cities, color = "red2", size = 2.6) +
   annotate("text", x = 180050.1, y = 480358.4, label = str_wrap("Dots Represent Cities with Population > 500,000",width=20), size = 3)
 black_stop_rate_map
 ```
 
+### Figure 6: Stop and search per 1000 population for White and Black Racial Group, Police Force Area, England and Wales, 2022
 ```{r barplot_racial_disparity_rate, eval=TRUE}
 #Generating a bar plot for further visualization of racial disparity by force
 
@@ -474,7 +511,7 @@ black_stop_rate_histogram <- race_stops_data %>%
   pivot_longer(cols = c(stop_rate_black,stop_rate_white), names_to = "race", values_to = "stop_rate") %>% 
   ggplot(aes(x = force_name, y = stop_rate, fill = race)) +
   geom_bar(stat = "identity", position = "identity", alpha = 0.5, width = 0.8) + 
-  scale_y_continuous(expand = c(0,0), limits = c(0, 120), breaks = seq(0, 120, by = 10)) +
+  scale_y_continuous(expand = c(0,0), limits = c(0, 90), breaks = seq(0, 90, by = 10)) +
   theme_minimal(base_size = 10) + 
   theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 6), # Rotate and adjust the font size
         axis.title = element_text(size = 12), # Adjust the axis title font size if needed
@@ -482,21 +519,23 @@ black_stop_rate_histogram <- race_stops_data %>%
         panel.grid.minor = element_blank(), # Disable minor grid lines
         panel.background = element_rect(fill = "white"),
         axis.line = element_line(color = "black"), legend.position = "bottom") +  # Add axis lines
-  labs(title = "Stop Search Rate by Police Force Area",
-       subtitle = "England and Wales, 2022",
+  labs(
        x = "Police Force Area (PFA)",
-       y = "Searches per 1000 Residents",
+       y = "Searches per 1000 Population",
        fill = "Racial Group") +  
   scale_fill_manual(values = c("stop_rate_black" = "skyblue", "stop_rate_white" = "gray10"),
                      labels = c("Black Ethnicity", "White Ethnicity"))
 black_stop_rate_histogram
 ```
 
-```{r london_hotspot_analysis, eval=TRUE}
+Figures 5 and 6 indicate a White-Black disparity in search rates as heavily disfavoring the Black racial group across England and Wales. Blacks are often searched at rates 5-6 times as often as Whites. Interestingly, urban areas tend to have lower racial disparity yet higher overall search rates. This suggests that rural areas, despite fewer total searches, nonetheless practice disproportional targeting of Blacks.  
+
+### Figure 7: Total Stop and Searches by MSOA, London, June 2022
+```{r london_total_stops_MSOA, eval=TRUE}
 #Now we ask the question: does race impact the location effect on stop and search? Are certain areas with high BAME populations more likely to experience stop and search?
 
 #For this, we can a slice of the metropolitan search data, specifically June 2022
-#We move up from LSOAs to MSOAs, as the former are too small to be useful for this analysis
+#We move up from LSOAs to MSOAs, as the former are too small to be useful for observing trends at the London level
 #Aim is to compare BAME population to stop and search rates to see if a possible relationship exists
 
 #Ensure spherical data set to false, otherwise the following code will often bug
@@ -541,7 +580,7 @@ metro_search_data <- metro_data %>%
 #Mapping the hotspots of stop and search in London, June 2022  
 metro_search_map <- MSOA_shapes %>%
   st_join(metro_search_data, by = c("MSOA_code")) %>%
-  #Use total searches rather than search rate, as MSOAs all have unifrom population, so variance would not change much
+  #Use total searches rather than search rate, as MSOAs all have uniform population, so actual variance would not change much
   mutate(total_searches = ifelse(is.na(total_searches), 0, total_searches)) %>% 
   mutate(total_searches = ifelse(total_searches > 150, 150, total_searches)) %>% 
   ggplot() +
@@ -551,7 +590,10 @@ metro_search_map <- MSOA_shapes %>%
   theme_void()
 
 metro_search_map
+```
 
+### Figure 8: BAME Population by MSOA, London, June 2022
+```{r london_BAME_population, eval=TRUE}
 #Mapping the BAME population of London
 metro_BAME_map <- MSOA_shapes %>%
   st_join(metro_search_data, by = c("MSOA_code")) %>%
@@ -566,6 +608,8 @@ metro_BAME_map <- MSOA_shapes %>%
 metro_BAME_map
 ```
 
+
+### Figure 9: Regression of BAME Population on Stop and Search Rates, London, June 2022
 ```{r}
 #Regression analysis
 MSOA_BAME_pop <- MSOA_BAME_pop %>% 
@@ -578,9 +622,36 @@ reg1 <- lm(total_searches ~ Percent_BAME, data = MSOA_BAME_pop)
 tbl_regression(reg1)
 ```
 
+Figures 7-9 demonstrate that a location effect of stop and search does not meaningfully interact with 'Black Asian Minority Ethnic' (BAME) population on the local level in London. Hotspots in search rates do not match high BAME population. While a statistically significant positive correlation exists (0.24), its magnitude is small. Location is significant for a person's expected rate of stop-search, but it is unlikely because of local area's ethnic minority population.
+
 ## Appendix: All code in this assignment
 
 ```{r ref.label=knitr::all_labels(), echo=TRUE, eval=FALSE} 
 ```
+
+## References
+
+Borooah, Vani. “Racial Bias in Policing: Police Stop and Searches in England and Wales.” Mpra.ub.uni-Muenchen.de, 2021, mpra.ub.uni-muenchen.de/113064/.
+
+Petherick, Wayne, and Nathan Brooks. “Reframing Criminal Profiling: A Guide for Integrated Practice.” Psychiatry, Psychology and Law, vol. 28, no. 5, 10 Dec. 2020, pp. 1–17, www.ncbi.nlm.nih.gov/pmc/articles/PMC9103349/, https://doi.org/10.1080/13218719.2020.1837030.
+
+
+## Data Sources
+
+[GB Cities Coords Data](https://www.doogal.co.uk/AdministrativeAreas.php?district=E09000001)
+
+[Sex by Single Year of Age National Data](https://www.ons.gov.uk/datasets/TS009/editions/2021/versions/2&sa=D&source=docs&ust=1705444043390295&usg=AOvVaw38-1FncW8tG-kGilcHU4OK)
+
+[Ethnic Population by LSOA](https://www.ons.gov.uk/filters/a88e6ddc-3e76-4eef-8d3f-9410921923a7/dimensions)
+
+[Stop and Search Data](https://data.police.uk/data/)
+
+[Shapefiles - LSOA, PFA, MSOA](https://geoportal.statistics.gov.uk/)
+
+[Census 2021 Data](https://www.ons.gov.uk/census)
+
+
+
+
 
 
