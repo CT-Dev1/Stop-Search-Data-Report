@@ -8,6 +8,10 @@ output: html_document
 knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
 ```
 
+# Investigation into UK Police Stop and Search Bias
+
+## Github Link: https://github.com/CT-Dev1/MY472-Final
+
 ```{r load_packages, eval = TRUE}
 #Load required packages
 library(ukpolice)
@@ -26,52 +30,49 @@ library(gtsummary)
 ```
 
 ```{r load_data, eval = TRUE, message = FALSE}
-#Ethnicity Population Data by LSOAs (downloaded from office for national statistics - 2021 data)
+#Ethnicity, Sex and Age Population Data at LSOA level - Census 2021 - Office of National Statistics
 ethnicity_data <- read.csv("data\\LSOA_ethnicity.csv")
-
-#Local District Shape Files from GeoJSON
-LSOA_shapes <- st_read("data\\LSOA_shapefiles.geojson", quiet = TRUE) %>% 
-  rename(LSOA_code = LSOA21CD, LSOA_name = LSOA21NM)
-  
-#Sex and Age Population Data For England and Wales
 pop_by_sex_age <- read.csv("data\\pop_by_sex_age.csv")
 
-#Police Force Shape files from GeoJSON
+#GeoJSON Shape files for LSOA, MSOA and Police Force Areas - Census 2021 - geoportal.statistics.gov.uk
+LSOA_shapes <- st_read("data\\LSOA_shapefiles.geojson", quiet = TRUE) %>% 
+  rename(LSOA_code = LSOA21CD, LSOA_name = LSOA21NM)
 pf_shapes <- st_read("data\\force_areas_shapefiles.geojson", quiet = TRUE) %>% 
-  rename(force_name = pfa16nm, force_code = pfa16cd) %>% 
+  rename(force_name = pfa16nm, force_code = pfa16cd) %>%
   mutate(force_name = ifelse(force_name=="Metropolitan Police", "Metropolitan", force_name))
+MSOA_shapes <- st_read("data//MSOA_shapefiles.geojson",quiet = TRUE) %>% 
+  rename(MSOA_code = MSOA21CD, MSOA_name = MSOA21NM) %>% 
+  #Join MSOA to Police Force Area for later spatial transformation
+  st_join(pf_shapes, join = st_intersects) %>% 
+  filter(force_name == "Metropolitan") %>% 
+  st_transform(crs = 4326) 
 ```
 
 ```{r process_data, eval = TRUE}
-#Create table for LSOAs by police force area
+#Join LSOA to Police Force Area (PFA) to associate each shapefiles with PFA for population aggregation
 LSOA_by_force <- LSOA_shapes %>% 
+  #Use LSOA centroid to join to PFA
   st_centroid() %>% 
   st_join(pf_shapes, join = st_intersects) %>% 
   as_tibble() %>% 
   select("LSOA_code", "LSOA_name", force_code, force_name)
 
-#Create table for population by ethnicity for LSOA
+#Sum all LSOA population statistics to get PFA-level statistics for ethnicity populations
 ethnicity_by_LSOA <- ethnicity_data %>% 
   rename(LSOA_code = Lower.layer.Super.Output.Areas.Code, LSOA_name = Lower.layer.Super.Output.Areas, ethnic_group = Ethnic.group..20.categories.) %>%
   select(LSOA_code, Observation, ethnic_group) %>%
   pivot_wider(names_from = ethnic_group, values_from = Observation) %>% 
   mutate(total_pop = rowSums(across(where(is.numeric))))
 
-#Read in the MSOA shapefiles
-MSOA_shapes <- st_read("data//MSOA_shapefiles.geojson",quiet = TRUE) %>% 
-  rename(MSOA_code = MSOA21CD, MSOA_name = MSOA21NM) %>% 
-  st_join(pf_shapes, join = st_intersects) %>% 
-  filter(force_name == "Metropolitan") %>% 
-  st_transform(crs = 4326)
-
-#Joining the two tables
+#Dataframe with the necessary ethnicity statistics by PFA
 ethnicity_by_force <- LSOA_by_force %>% 
   full_join(ethnicity_by_LSOA, by = "LSOA_code") %>% 
   group_by(force_code, force_name) %>%
   mutate(force_name = str_replace_all(force_name, " Police", "")) %>%
   summarize(across(where(is.numeric), sum, na.rm = TRUE))
 
-#Cleaning the age and sex population data
+#Preprocessing the population by age and sex data
+#PFA-level aggregation not necessary here, as sex/age data only used on the national level
 pop_by_sex_age <- pop_by_sex_age %>% 
   select(Sex..2.categories., Age..91.categories..Code, Observation) %>% 
   rename(gender = Sex..2.categories., age = Age..91.categories..Code, population = Observation) %>% 
@@ -79,93 +80,110 @@ pop_by_sex_age <- pop_by_sex_age %>%
 ```
 
 ```{r API_input_dataset, eval = TRUE}
-#Create table that relates API input, force name and force code in standard format
+#Preparing for API query
+#Vector with correct police force inputs to iterate over
 police_forces <- ukc_forces()%>% 
   rename(force_name = name, ukc_input = id)%>% 
   mutate(force_name = str_replace_all(force_name, " Police", "")) %>% 
   mutate(force_name = str_replace_all(force_name, " Constabulary", "")) %>% 
   mutate(force_name = str_replace_all(force_name, "&", "and")) %>%
   mutate(force_name = str_replace_all(force_name, " Service", "")) %>%
+  #Join to get the force code, force name, creating a reference table for later joins
   inner_join(ethnicity_by_force, by = "force_name") %>% 
   select(force_name, ukc_input, force_code)
 
-#Vector of months to loop through, input into API
+#Vector of months to loop through
 dates <- c("2022-01","2022-02","2022-03","2022-04","2022-05","2022-06","2022-07","2022-08","2022-09","2022-10","2022-11","2022-12")
+
+#NOTE: police.uk API is packaged into the ukpolice package for accessibility
 ```
 
 
 ```{r API_query_loop, eval = FALSE}
-'
-#Function to clean the raw data from API
+#CODE BELOW TO RUN ONLY IF API QUERY IS REQUIRED
+"
+#Data Cleaning Function - To be passed to raw API Output
 clean_ss_data <- function(ss_data, force, month) {
   force_data <- ss_data %>% 
     mutate(ukc_input = force) %>% 
-    inner_join(police_forces, by = "ukc_input") %>% 
+    # Join to reference table to get force code
+    inner_join(police_forces, by = 'ukc_input') %>%
+    # Select Necessary Columns
     select(age_range, gender, self_defined_ethnicity, officer_defined_ethnicity, legislation, object_of_search, outcome_object_name, legislation, force_code, force_name, ukc_input) %>% 
-    #replace "Not stated" ethnicity with NA
-    mutate(self_defined_ethnicity = ifelse(grepl("Not stated", self_defined_ethnicity), NA, self_defined_ethnicity)) %>% 
+    # Self-defined ethnicity is often coded as not stated, replace with NA as this is not useful for analysis
+    mutate(self_defined_ethnicity = ifelse(grepl('Not stated', self_defined_ethnicity), NA, self_defined_ethnicity)) %>% 
+    # Define racial_group based on either officer or self defined ethnicity (self-defined preferred) to maximize available racial information
     mutate(racial_group = ifelse(is.na(self_defined_ethnicity), officer_defined_ethnicity, self_defined_ethnicity)) %>% 
-    #Add column for racial_group based on ethnicity classification
-    mutate(racial_group = ifelse(grepl("Mixed", racial_group, fixed = TRUE), 'Mixed',
-                           ifelse(grepl("Asian", racial_group, fixed = TRUE), 'Asian',
-                           ifelse(grepl("Black", racial_group, fixed = TRUE), 'Black',
-                           ifelse(grepl("White", racial_group, fixed = TRUE), 'White',
-                           ifelse(grepl("Other", racial_group, fixed = TRUE), 'Other', NA)))))) %>% 
+    # Classify racial_group based on official ethnicity groupings from Census 2021 
+    # Note the ordering of the ifelse statements is important, otherwise grepl may classify incorrectly
+    mutate(racial_group = ifelse(grepl('Mixed', racial_group, fixed = TRUE), 'Mixed',
+                           ifelse(grepl('Asian', racial_group, fixed = TRUE), 'Asian',
+                           ifelse(grepl('Black', racial_group, fixed = TRUE), 'Black',
+                           ifelse(grepl('White', racial_group, fixed = TRUE), 'White',
+                           ifelse(grepl('Other', racial_group, fixed = TRUE), 'Other', NA)))))) %>% 
     mutate(month = month)
   return(force_data)
 }
 
-#Script to download stop and search data for all police forces over 2022
+#Beginning API query
 
-#Empty tibble to store the data
-stop_search_2022 <- ukc_stop_search_force("bedfordshire","2022-01") %>%
-  clean_ss_data("bedfordshire", "2022-01") %>%
+#Creating empty tibble of correct dimensions to store the full dataset
+stop_search_2022 <- ukc_stop_search_force('bedfordshire','2022-01') %>%
+  clean_ss_data('bedfordshire', '2022-01') %>%
   slice(0)
 
-#table to store missing forces and months
+#Creating table to store combinations of forces and time-periods that have no data available
 missing_data = tibble(ukc_input = character(), month = character())
 
-#Loop over all police forces and months
+#Aim is to get full dataset of every stop and search in 2022, this is a large dataset, however it allows for granular analysis and a highly informative option, allowing us to query the API just once and store the data
+
+#Iterate through all months in 2022 and PFAs
 for (month in dates){
   for (force in police_forces$ukc_input){
     force_data <- ukc_stop_search_force(force, month)
+    #Error handling for missing data
     if (length(force_data)==0 | is.null(force_data)){
       missing_data <- missing_data %>% 
         add_row(ukc_input = force, month = month)
       next
     } else {
+    #API Query and data cleaning
     stop_search_2022 <- force_data %>% 
       clean_ss_data(force, month) %>%
+      #Append to full dataset
       rbind(stop_search_2022)
     }}
+  #Sleep to be cautious of API over-querying
   Sys.sleep(3) 
 }
-'
+"
 ```
 
 
 ```{r API_forward_filling_for_missing_data, eval = FALSE}
-#There is missing data, so investigate police API issue log at https://data.police.uk/changelog/
-#Some forces have partial missing data for 2022, so we will utilize forward propagation to fill in the data
+#After inspecting the missing_data table, there is a large proportion of missing forces with partial data for 2022
+#Consulting API issue log at https://data.police.uk/changelog/ reveals these to be data reporting outages
+#To avoid estimating inaccurate annual search rates, we will forward fill the data for the missing months
 '
 #Create table of partial missing data
 partial_missing_forces <- missing_data %>% 
+  #Filer out manchester, gwent and north yorkshire as these are fully missing 2022 data, will be dealt with separately
   filter(ukc_input %in% c("greater-manchester","gwent", "north-yorkshire")==FALSE) %>% 
   mutate(month_index = as.numeric(str_replace_all(month, "2022-", ""))) 
 
-#create table of inputs for forward propagation
+#Create input table for forward filling 
 forward_prop_input <- missing_data %>% 
   filter(ukc_input %in% c("greater-manchester","gwent", "north-yorkshire")==FALSE) %>% 
   group_by(ukc_input) %>%
   summarize(missing_months = n()) %>% 
   inner_join(police_forces, by = "ukc_input")
 
-#Script to loop over missing data by force and month
-
+#Iterate over partial missing forces
 for (force in forward_prop_input$ukc_input){
   missing_months <- forward_prop_input$missing_months[forward_prop_input$ukc_input==force]
   last_record_month <- min(partial_missing_forces$month_index[partial_missing_forces$ukc_input==force]) -1
   month_input <- paste0("2022-", last_record_month)
+  #Fill in between last recorded month and next valid observation
   for (i in 1:forward_prop_input$missing_months[forward_prop_input$ukc_input==force]){
     force_data <- ukc_stop_search_force(force, month_input)
     month_filled_input <- paste0("2022-", last_record_month+i)
@@ -174,35 +192,31 @@ for (force in forward_prop_input$ukc_input){
       rbind(stop_search_2022)
   }
 }
-'
-#Write to disk, this is commented out, data is stored in stop_search_2022.csv in data folder (within the github)
-#write.csv(stop_search_2022, "data//stop_search_2022.csv", row.names=FALSE)
-```
 
-
-```{r load_pre_scraped_data, eval = TRUE}
-#Load full dataset from csv, which is only missing data for Greater Manchester, Gwent and North Yorkshire, these I add manually at later stages
-stop_search_2022 <- read_csv("data//stop_search_2022.csv")
-```
-
-```{r test_for_data_completeness, eval = FALSE}
-#test that forward propagation worked using the test case of South Wales, which previously had some missing data
-'
+#Running a short-test to ensure that forward filling worked as intended
 stop_search_2022 %>% 
   filter(force_name == "South Wales") %>% 
   group_by(month) %>% 
   summarize(total_stops = n()) %>% 
   print()
-
-#Demonstration that API fails for some forces - greater manchester, gwent and north yorkshire
-url <- "https://data.police.uk/api/stops-force?force=greater-manchester&date=2022-02"
-json <- content(GET(url), "parsed")
-print(is.null(json)|length(json)==0)
+  
+#There should now be all 12 months of data for South Wales PFA
 '
+#Full API scrap and missing data fill is now complete, write data to csv to avoid future scraping - see stop_search_2022.csv in data folder (github access)
+#write.csv(stop_search_2022, "data//stop_search_2022.csv", row.names=FALSE)
+```
+
+```{r load_pre_scraped_data, eval = TRUE}
+#Load in the pre-scraped data - Note this is missing Manchester, North Yorkshire and Gwent PFAs
+stop_search_2022 <- read_csv("data//stop_search_2022.csv")
 ```
 
 ```{r sex_and_age_data_analysis}
-#format the sex and age population stats to match the format in police.uk data
+#Now we have the full dataset, we can begin to analyse the data
+#First off, analysing age and sex of those stopped and searched 
+#We do this at the national level, as there is less rationale for regional variation in this case
+
+#Group national sex and age population statistics to match the encoding from police.uk data
 pop_sex_age_formatted <- pop_by_sex_age %>% 
   mutate(age_range = ifelse(age < 10, "under 10", 
                     ifelse(age <=17, "10-17", 
@@ -211,21 +225,24 @@ pop_sex_age_formatted <- pop_by_sex_age %>%
   group_by(age_range, gender) %>%
   summarize(population = sum(population), population_percent=sum(population_percent))
   
-#Stop rates by sex and age
+#Find proportion of searches by combinations of age group and sex
 stops_by_age_and_sex <- stop_search_2022 %>% 
   filter(is.na(age_range)==FALSE) %>% 
   group_by(age_range, gender) %>%
   summarize(stops_recorded = n()) %>% 
   filter(gender %in% c("Male", "Female")) %>% 
-  #total stops is 426768 (stops with recorded age_range data)
+  #total searches of this data is 426768 (i.e. searches that recorded age information)
   mutate(percentage_stops = (stops_recorded/426768)*100) %>% 
+  #Join to population data to measure disproportionality of search rates
   inner_join(pop_sex_age_formatted, by = join_by(age_range, gender))
 
+#Convert the searches data to tidy-long format for plotting
 age_gender_percent_stops <- stops_by_age_and_sex %>% 
   select(age_range, gender, percentage_stops) %>% 
   mutate(gender = paste0("stops-", gender)) %>% 
   rename(percentage = percentage_stops)
 
+#Finally, get the population data in tidy-long format, then append to the searches data
 age_sex_stops_population <- stops_by_age_and_sex %>% 
   select(age_range, gender, population_percent) %>% 
   mutate(population_percent = -1*population_percent) %>% 
@@ -234,6 +251,8 @@ age_sex_stops_population <- stops_by_age_and_sex %>%
   rbind(age_gender_percent_stops) %>% 
   filter(age_range != "under 10")
 
+#Plot the data in a mirrored vertical bar plot, filling by gender
+#This serves to compare rates of searches against proportion of the population for gender and age group
 stops_by_age_and_sex_histogram <- age_sex_stops_population %>% 
   ggplot(aes(x = age_range, y = percentage, fill = gender)) +
   geom_bar(stat = "identity", position = "stack", width = 0.50) +
@@ -254,36 +273,36 @@ stops_by_age_and_sex_histogram <- age_sex_stops_population %>%
 stops_by_age_and_sex_histogram
 ```
 
-
 ```{r racial_analysis_data_for_missing_forces, eval = TRUE}
-#Manchester, Gwent and North Yorkshire have no data at all
-#Rather than exclude from analysis, we can load in existing racial search data from gov.uk
+#Further age/gender visualizations could be generated, however the robustness of the national trend is clear
+
+#Moving onto the racial analysis, a first step is to fill in the missing data for Manchester, North Yorkshire and Gwent so we can work with a complete sample
+
+#Data extracted from an alternative gov.uk source
 missing_forces_ss <- read.csv("data/missing_forces_stop_search.csv")
+
+#Clean and filter this data to match the police.uk data
 missing_forces_ss <- missing_forces_ss %>% 
   rename(number_of_stop_and_searches_ethnicity_reported = total_number_of_stop_and_search_carried_out_in_this_year_in_this_area_excluding_cases_where_the_ethnicity_was_unreported, stop_search_rate_ethnicity = proportion_of_total_stop_and_searches_of_this_ethnicity_in_the_financial_year_excludes_unreported, force_name = geography) %>%
   mutate(time = as.character(time)) %>% 
   filter(force_name %in% c("Gwent", "Greater Manchester", "North Yorkshire")==TRUE) %>% 
+  #Note that this replacement is for 2021/22, yet it serves as a reasonable approximation for 2022
   filter(geography_type == "Police Force Area" & time == "2021/22") %>% 
-  #Note ethnicity column is coded differently in this dataset, includes labels for ethnicity and race
+  #Note variables are encoded differently in this data, it will be converted to police.uk standard
   select(ethnicity, force_name, number_of_stop_and_searches, number_of_stop_and_searches_ethnicity_reported, population_by_ethnicity, rate_per_1_000_population_by_ethnicity, stop_search_rate_ethnicity)
-
-#Now we can combine these datasets to have a complete picture across all force areas
-
 ```
 
-Notes on missing data source:
-- Is for financial year 2021-22, so not exactly calendar year but a good approximation
-
 ```{r racial_analysis_dataset_complete, eval = TRUE}
-#Begin by analyzing race
+#First a few additional processing steps before finding racial search rate figures
 
-#To find search rate per 1000, first we need populations by force area
+#Aggregating racial group populations from the ethnicity populations by PFA dataset
 race_by_force <- ethnicity_by_force %>% 
   pivot_longer(cols = -c(force_code,force_name), names_to = "racial_group", values_to = "population") %>% 
-  mutate(racial_group = ifelse(grepl("White", racial_group, fixed = TRUE), 'White',
+  #Using same grepl approach as before
+  mutate(racial_group = ifelse(grepl("Mixed", racial_group, fixed = TRUE), 'Mixed',
                        ifelse(grepl("Asian", racial_group, fixed = TRUE), 'Asian',
                        ifelse(grepl("Black", racial_group, fixed = TRUE), 'Black',
-                       ifelse(grepl("Mixed", racial_group, fixed = TRUE), 'Mixed',
+                       ifelse(grepl("White", racial_group, fixed = TRUE), 'White',
                        ifelse(grepl("Other", racial_group, fixed = TRUE), 'Other', NA)))))) %>%
   group_by(force_name, racial_group) %>% 
   summarize(population = sum(population[racial_group==racial_group])) %>% 
@@ -292,52 +311,55 @@ race_by_force <- ethnicity_by_force %>%
   mutate(population_Total = population_White + population_Black + population_Mixed + population_Asian + population_Other) %>%
   inner_join(police_forces, by = "force_name")
 
-#First let's find the number of stops by race for the three missing forces (Manchester, Gwent and North Yorkshire)
+#Getting the number of searches by race for the 3 missing forces
 race_stops_data_missing <- missing_forces_ss %>% 
   filter(ethnicity %in% c("White", "Black", "Mixed", "Asian", "Other")==TRUE) %>% 
   select(c(number_of_stop_and_searches, ethnicity, force_name)) %>% 
   pivot_wider(names_from = ethnicity, values_from = number_of_stop_and_searches, names_prefix = "stops_")
 
-#Next lets find the total searches by force area, including those with no racial data
+#Finding the total_stops for each force from the complete search dataset
 stops_total_by_force <- stop_search_2022 %>% 
   group_by(force_name) %>% 
   summarize(number_of_stop_and_searches = n()) %>% 
   inner_join(police_forces, by = "force_name") %>% 
   bind_rows(missing_forces_ss) %>% 
-  #get first 43 rows
+  #get first 43 rows, which are the police forces
   slice(1:43) %>%
   select(force_name, number_of_stop_and_searches) %>%
   rename(stops_Total = number_of_stop_and_searches)
 
-#Finally, lets aggregate all tables, finding racial stop rates for each force - FINAL RACIAL DATA
+#Lastly, aggregate all racial tables to find total search rates by PFA and racial group - FINAL RACIAL BIAS DATA
 race_stops_data <- stop_search_2022 %>% 
   #Filter for stops where racial group is known
   filter(is.na(racial_group)==FALSE) %>% 
   group_by(force_name) %>% 
   summarize(stops_Black = sum(racial_group=="Black"), stops_White = sum(racial_group=="White"), stops_Mixed = sum(racial_group=="Mixed"), stops_Asian = sum(racial_group=="Asian"), stops_Other = sum(racial_group=="Other")) %>% 
-  #Add the missing forces
+  #Add the 3 missing forces
   rbind(race_stops_data_missing) %>%
   mutate(stops_All = stops_Black + stops_White + stops_Mixed + stops_Asian + stops_Other) %>%
   inner_join(police_forces, by = "force_name") %>%
+  #Add population data
   inner_join(race_by_force, by = c("force_name","force_code","ukc_input")) %>%
-  #Find rates of stop and search per 1000 people
+  #Find rates of stop and search per 1000 people by Race
   inner_join(stops_total_by_force, by = "force_name") %>% 
   mutate(stop_rate_black = (stops_Black/population_Black)*1000, stop_rate_white = (stops_White/population_White)*1000, stop_rate_mixed = (stops_Mixed/population_Mixed)*1000, stop_rate_asian = (stops_Asian/population_Asian)*1000, stop_rate_other = (stops_Other/population_Other)*1000, stop_rate_all_races = (stops_All/population_Total)*1000, stops_rate_Total = (stops_Total/population_Total)*1000) 
 ```
 
 
 ```{r map_total_search_rate_by_force, eval=TRUE}
-#cities points to add to maps
+#Now we can visualize the total search rate by force on a map by joining with PFA shapefiles
+
+#Before this, let's load data on UK city locations to determine if an association with search rates is visible on a map
 uk_cities <- read.csv("data//gb_cities.csv") %>% 
   st_as_sf(coords = c("lng", "lat"), crs = 4326) %>% 
   st_transform(27700) %>% 
   filter(population > 500000)
 
-#We can visualize the above table on a map to get a better sense of geographic variation
+#Generating the map of search rates by PFA
 total_stop_rate_map <- pf_shapes %>% 
   inner_join(race_stops_data, by = c("force_name")) %>%
   select(force_name, stops_rate_Total) %>%
-  #Filter out city of london as outlier
+  #Filter out city of london as outlier - It has a very high search rate due to high visitation and low resident population
   filter(force_name != "City of London") %>%
   ggplot() + geom_sf(aes(fill = stops_rate_Total)) +
   scale_fill_viridis_c( 
@@ -350,11 +372,12 @@ total_stop_rate_map <- pf_shapes %>%
   labs(title = "Search Rate by Police Force Area", subtitle = "2022", caption = "Source: police.uk | Based on 507,381 Total Searches") +
   geom_sf(data = uk_cities, color = "red2", size = 2.6) +
   annotate("text", x = 180050.1, y = 480358.4, label = str_wrap("Dots Represent Cities with Population > 500,000",width=20), size = 3)
-
 total_stop_rate_map
 ```
--Exclude city of london from further estimates
 ```{r bar_plot_search_rate_by_PFA, eval=TRUE}
+#The map is a good indicator of geographic-level trends but it is difficult to measure magnitude of difference
+#A barplot serves this function
+
 #Displaying via histogram
 ss_rate_by_force <- race_stops_data %>% 
   filter(force_name != "City of London") %>% 
@@ -362,7 +385,7 @@ ss_rate_by_force <- race_stops_data %>%
   mutate(stop_rate_total = stops_rate_Total) %>% 
   arrange(desc(stop_rate_total))
 
-#Order forces in descending order by stop rate
+#refactor forces in descending order of stop rate
 ss_rate_by_force$force_name <- factor(ss_rate_by_force$force_name, levels = ss_rate_by_force$force_name[order(-ss_rate_by_force$stop_rate_total)])
 
 #Generate Bar plot
@@ -375,18 +398,17 @@ total_stop_rate_histogram <- ggplot(ss_rate_by_force, aes(x = force_name, y = st
         panel.grid.major = element_line(color = "gray", size = 0.5), # Add major grid lines
         panel.grid.minor = element_blank(), # Disable minor grid lines
         panel.background = element_rect(fill = "white"),axis.line = element_line(color = "black")) +  # Add axis lines
-  labs(title = "Stop Search Rate by Police Force Area",
+  labs(title = "Search Rate by Police Force Area",
        subtitle = "England and Wales, 2022",
        x = "Police Force Area (PFA)",
        y = "Searches per 1000 Residents")
-
 total_stop_rate_histogram
 ```
 
 
 
 ```{r table_of_search_rate_by_race_PFA, eval=TRUE}
-#Now we can visualize the racial search data
+#It's clear that there is a large variation in search rates by force, now let's examine how racial disparity varies across forces
 
 #Summary table - race stop rates by force
 race_stops_data %>% 
@@ -404,20 +426,17 @@ race_stops_data %>%
     style = list(cell_text(weight = "bold")),
     locations = list(cells_column_labels(columns = everything()), cells_body(columns = c(1))))
 ```
-Notes on table above:
-- Demonstrates stop and search rate varies significantly across areas
-- Gives the outlier of City of London - it should be removed from further analysis
-- Note that all races stop rate may be smaller than official statistics given that we are analysing on searches where race is known
-- add column for demographic - number of total searches and population
-
 
 ```{r map_racial_disparity_rate, eval=TRUE}
-library(viridis)
+#The table is very informative, but it's difficult to capture exact trends across forces
+#Appears the Black vs. White gap is significant, it is worth visualizing racial disparity (the ratio of black to white stop rates)
+
+#Generating map of racial disparity by PFA
 black_stop_rate_map <- pf_shapes %>% 
   inner_join(race_stops_data, by = c("force_name")) %>%
   select(force_name, stop_rate_black, stop_rate_white) %>% 
   mutate(black_white_ratio = stop_rate_black/stop_rate_white) %>%
-  #limit range of ratio to 5
+  #limit range of ratio to 8 (in order to visualization the greatest data variation)
   mutate(black_white_ratio = ifelse(black_white_ratio > 8, 8, black_white_ratio)) %>%
   filter(force_name != "City of London") %>%
   ggplot() + 
@@ -425,7 +444,7 @@ black_stop_rate_map <- pf_shapes %>%
   scale_fill_viridis_c(
     direction = -1, 
     na.value = "red", 
-    name = str_wrap("Search Disparity Rate: Black vs. White", width=15),
+    name = str_wrap("Search Disparity Rate", width=15),
     trans = "identity",
     limits = c(0, 8),
     breaks = c(0, 2, 4, 6, 8),
@@ -433,18 +452,18 @@ black_stop_rate_map <- pf_shapes %>%
   ) +
   theme_void() +
   theme(legend.position = "right") +
-  labs(title = str_wrap("Search Disparity Rate by Force Area: Black vs. White Racial Group", width = 35), subtitle = "2022", caption = "Source: police.uk | Based on 485,930 Searches") +
+  labs(title = str_wrap("Disparity Rate for Black Racial Group compared to White", width = 35), subtitle = "England and Wales PFAs | 2022", caption = "Source: police.uk | Based on 485,930 Searches") +
+  #Once again, add the cities to the map, to see if urbanization may be a factor in racial biasing
   geom_sf(data = uk_cities, color = "red2", size = 2.6) +
   annotate("text", x = 180050.1, y = 480358.4, label = str_wrap("Dots Represent Cities with Population > 500,000",width=20), size = 3)
 black_stop_rate_map
 ```
 
 ```{r barplot_racial_disparity_rate, eval=TRUE}
-#Barplot of the disparity rate by force area
+#Generating a bar plot for further visualization of racial disparity by force
 
 #Order forces in descending order by stop rate
 race_stops_data$force_name <- factor(race_stops_data$force_name, levels = race_stops_data$force_name[order(-race_stops_data$stop_rate_black)])
-
 race_stops_data <- race_stops_data %>% 
   filter(force_name != "City of London")
 
@@ -474,12 +493,17 @@ black_stop_rate_histogram
 ```
 
 ```{r london_hotspot_analysis, eval=TRUE}
-#LONDON CASE STUDY DATASET
+#Now we ask the question: does race impact the location effect on stop and search? Are certain areas with high BAME populations more likely to experience stop and search?
 
-#Ensure spherical data use set to false otherwise, this chunk will error
+#For this, we can a slice of the metropolitan search data, specifically June 2022
+#We move up from LSOAs to MSOAs, as the former are too small to be useful for this analysis
+#Aim is to compare BAME population to stop and search rates to see if a possible relationship exists
+
+#Ensure spherical data set to false, otherwise the following code will often bug
 sf_use_s2(FALSE)
 
-#Finding BAME population per MSOA
+#Finding BAME population per MSOA using shapefiles
+#BAME is all non-white racial groups
 MSOA_BAME_pop <- MSOA_shapes %>% 
   st_transform(crs = 27700) %>%
   st_join(LSOA_shapes, join = st_intersects) %>% 
@@ -506,14 +530,18 @@ metro_data <- ukc_stop_search_force("metropolitan","2022-06") %>% as_tibble()
 
 metro_search_data <- metro_data %>% 
   filter(!is.na(latitude)) %>%
+  #Convert lat-long coordinates to shapefile, then use shapefile intersect to group into MSOA
   st_as_sf(coords = c("longitude", "latitude"), crs = 4326) %>% 
   st_join(MSOA_shapes) %>%
   filter(!is.na(MSOA_code)) %>%
+  #Summarize number of searches per MSOA
   group_by(MSOA_code) %>%
   summarise(total_searches = n())
-  
+
+#Mapping the hotspots of stop and search in London, June 2022  
 metro_search_map <- MSOA_shapes %>%
   st_join(metro_search_data, by = c("MSOA_code")) %>%
+  #Use total searches rather than search rate, as MSOAs all have unifrom population, so variance would not change much
   mutate(total_searches = ifelse(is.na(total_searches), 0, total_searches)) %>% 
   mutate(total_searches = ifelse(total_searches > 150, 150, total_searches)) %>% 
   ggplot() +
@@ -524,6 +552,7 @@ metro_search_map <- MSOA_shapes %>%
 
 metro_search_map
 
+#Mapping the BAME population of London
 metro_BAME_map <- MSOA_shapes %>%
   st_join(metro_search_data, by = c("MSOA_code")) %>%
   rename(MSOA_code = MSOA_code.x) %>% 
@@ -533,6 +562,7 @@ metro_BAME_map <- MSOA_shapes %>%
   scale_fill_viridis_c(name = str_wrap("BAME Percent of Population",width=15)) +
   theme_void()
 
+#Now we can visually compare the two maps to see if hotspots overlap with areas of high BAME population
 metro_BAME_map
 ```
 
@@ -541,8 +571,9 @@ metro_BAME_map
 MSOA_BAME_pop <- MSOA_BAME_pop %>% 
   inner_join(metro_search_data, by = c("MSOA_code")) %>% 
   as_tibble() %>% 
+  rename(Percent_BAME = BAME_prop) %>% 
   mutate(percent_searches = (total_searches/sum(total_searches))*100)
-reg1 <- lm(total_searches ~ BAME_prop, data = MSOA_BAME_pop)
+reg1 <- lm(total_searches ~ Percent_BAME, data = MSOA_BAME_pop)
 
 tbl_regression(reg1)
 ```
