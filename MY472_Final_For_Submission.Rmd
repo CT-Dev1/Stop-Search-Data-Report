@@ -30,14 +30,14 @@ library(gtsummary)
 ethnicity_data <- read.csv("data\\LSOA_ethnicity.csv")
 
 #Local District Shape Files from GeoJSON
-LSOA_shapes <- st_read("data\\LSOA_shapefiles.geojson") %>% 
+LSOA_shapes <- st_read("data\\LSOA_shapefiles.geojson", quiet = TRUE) %>% 
   rename(LSOA_code = LSOA21CD, LSOA_name = LSOA21NM)
   
 #Sex and Age Population Data For England and Wales
 pop_by_sex_age <- read.csv("data\\pop_by_sex_age.csv")
 
 #Police Force Shape files from GeoJSON
-pf_shapes <- st_read("data\\force_areas_shapefiles.geojson") %>% 
+pf_shapes <- st_read("data\\force_areas_shapefiles.geojson", quiet = TRUE) %>% 
   rename(force_name = pfa16nm, force_code = pfa16cd) %>% 
   mutate(force_name = ifelse(force_name=="Metropolitan Police", "Metropolitan", force_name))
 ```
@@ -58,7 +58,7 @@ ethnicity_by_LSOA <- ethnicity_data %>%
   mutate(total_pop = rowSums(across(where(is.numeric))))
 
 #Read in the MSOA shapefiles
-MSOA_shapes <- st_read("data//MSOA_shapefiles.geojson") %>% 
+MSOA_shapes <- st_read("data//MSOA_shapefiles.geojson",quiet = TRUE) %>% 
   rename(MSOA_code = MSOA21CD, MSOA_name = MSOA21NM) %>% 
   st_join(pf_shapes, join = st_intersects) %>% 
   filter(force_name == "Metropolitan") %>% 
@@ -439,7 +439,7 @@ black_stop_rate_map <- pf_shapes %>%
 black_stop_rate_map
 ```
 
-```{r}
+```{r barplot_racial_disparity_rate, eval=TRUE}
 #Barplot of the disparity rate by force area
 
 #Order forces in descending order by stop rate
@@ -473,7 +473,7 @@ black_stop_rate_histogram <- race_stops_data %>%
 black_stop_rate_histogram
 ```
 
-```{r}
+```{r london_hotspot_analysis, eval=TRUE}
 #LONDON CASE STUDY DATASET
 
 #Ensure spherical data use set to false otherwise, this chunk will error
